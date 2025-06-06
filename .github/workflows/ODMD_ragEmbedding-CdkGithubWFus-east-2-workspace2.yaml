@@ -51,6 +51,7 @@ jobs:
             cd "${{ env.ODMD_work_dir }}"
           else
             echo "ODMD_work_dir is empty, staying in current directory"
+            ls -ltarh
           fi
           
           pwd

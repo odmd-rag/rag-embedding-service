@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# RAG Document Processing Service Build Script
+# RAG Rag embedding Service Build Script
 
-set -e
+set -ex
 
-echo "Building RAG Document Processing Service..."
+echo "Building RAG Rag embedding Service..."
 
 # Ensure we're in the correct directory
 cd "$(dirname "$0")/.."
@@ -15,17 +15,7 @@ if [ -z "$AWS_REGION" ]; then
     echo "Using default AWS region: $AWS_REGION"
 fi
 
-# Install main dependencies
-echo "Installing main dependencies..."
-npm install
-
 # Build the handlers
 echo "Building Lambda handlers..."
 cd lib/handlers
 npm install
-npm run build
-cd ../..
-
-# Build TypeScript
-echo "Building TypeScript..."
-npx tsc

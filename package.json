@@ -6,9 +6,10 @@
   "scripts": {
     "build": "tsc",
     "clean": "tsc --build --clean",
-    "cdk-ls": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk ls --show-dependencies --profile odmd-rag-ws1",
+    "cdk-ls": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk ls --profile odmd-rag-ws1",
+    "cdk-ls-deps": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk ls --show-dependencies --profile odmd-rag-ws1",
     "cdk-synth": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk synth --all --profile odmd-rag-ws1",
-    "cdk-deploy": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk deploy ragDocumentProcessing--dev  --profile odmd-rag-ws1 ",
+    "cdk-deploy": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk deploy ragEmbedding--dev --no-rollback --profile odmd-rag-ws1",
     "watch": "tsc -w",
     "test": "jest",
     "cdk": "cdk"

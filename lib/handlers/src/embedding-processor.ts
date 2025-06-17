@@ -134,7 +134,7 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         const embeddingDuration = Date.now() - embeddingStartTime;
 
         console.log(`[${requestId}] ✅ Step 2 PASSED: Embedding generated in ${embeddingDuration}ms`);
-        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v1`);
+        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v2:0`);
         console.log(`[${requestId}]   Dimensions: ${embedding.embedding.length}`);
         console.log(`[${requestId}]   Token count: ${embedding.inputTextTokenCount}`);
 
@@ -150,7 +150,7 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
             content: embeddingTask.content,
             originalDocumentInfo: embeddingTask.originalDocumentInfo,
             embeddingMetadata: {
-                model: 'amazon.titan-embed-text-v1',
+                model: 'amazon.titan-embed-text-v2:0',
                 dimensions: embedding.embedding.length,
                 tokenCount: embedding.inputTextTokenCount,
                 processingTimeMs: embeddingDuration
@@ -191,7 +191,7 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
     
     try {
         console.log(`[${requestId}] 🌐 Invoking Bedrock model...`);
-        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v1`);
+        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v2:0`);
         console.log(`[${requestId}]   Text length: ${text.length} characters`);
         console.log(`[${requestId}]   Text preview: "${text.substring(0, 200)}..."`);
         
@@ -203,7 +203,7 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
         };
         
         const command = new InvokeModelCommand({
-            modelId: 'amazon.titan-embed-text-v1',
+            modelId: 'amazon.titan-embed-text-v2:0',
             contentType: 'application/json',
             accept: 'application/json',
             body: JSON.stringify(requestPayload)
@@ -228,7 +228,7 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
         const parseDuration = Date.now() - parseStartTime;
         console.log(`[${requestId}] ✅ Response parsed in ${parseDuration}ms`);
         console.log(`[${requestId}] 📊 Bedrock embedding response:`);
-        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v1`);
+        console.log(`[${requestId}]   Model: amazon.titan-embed-text-v2:0`);
         console.log(`[${requestId}]   Dimensions: ${embeddingResponse.embedding.length}`);
         console.log(`[${requestId}]   Input tokens: ${embeddingResponse.inputTextTokenCount}`);
         console.log(`[${requestId}]   Embedding sample: [${embeddingResponse.embedding.slice(0, 5).join(', ')}...]`);

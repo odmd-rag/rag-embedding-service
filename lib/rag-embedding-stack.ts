@@ -236,7 +236,7 @@ export class RagEmbeddingStack extends cdk.Stack {
                 'bedrock:InvokeModel'
             ],
             resources: [
-                `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v1`
+                `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`
             ]
         }));
 

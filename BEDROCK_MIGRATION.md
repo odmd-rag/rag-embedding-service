@@ -2,14 +2,14 @@
 
 ## Migration Summary
 
-Successfully migrated the RAG Embedding Service from **OpenAI API** to **AWS Bedrock Titan Embed v1** for cost optimization and better AWS integration. Also implemented **hierarchical IAM role naming** for better organization and security.
+Successfully migrated the RAG Embedding Service from **OpenAI API** to **AWS Bedrock Titan Embed v2** for cost optimization and better AWS integration. Also implemented **hierarchical IAM role naming** for better organization and security.
 
 ## 🔄 Changes Made
 
 ### 1. **Embedding Processor Implementation**
 - **Removed**: OpenAI API calls via `fetch()` + API key management
 - **Added**: AWS Bedrock SDK with `InvokeModelCommand`
-- **Model**: `amazon.titan-embed-text-v1` (1536 dimensions)
+- **Model**: `amazon.titan-embed-text-v2:0` (1024 dimensions by default, configurable)
 
 ### 2. **Dependencies Updated**
 ```diff
@@ -22,7 +22,7 @@ Successfully migrated the RAG Embedding Service from **OpenAI API** to **AWS Bed
 - **Removed**: AWS Secrets Manager secret for OpenAI API key
 - **Added**: Bedrock IAM permissions for embedding generation
 - **Added**: Hierarchical IAM role naming with proper path/roleName separation
-- **Policy**: `bedrock:InvokeModel` on `amazon.titan-embed-text-v1`
+- **Policy**: `bedrock:InvokeModel` on `amazon.titan-embed-text-v2:0`
 
 ### 4. **Hierarchical IAM Role Structure**
 ```typescript
@@ -44,7 +44,7 @@ role: new iam.Role(this, 'EmbeddingProcessorRole', {
 
 ## 📊 Cost Comparison
 
-| Metric | OpenAI text-embedding-3-small | AWS Bedrock Titan Embed v1 |
+| Metric | OpenAI text-embedding-3-small | AWS Bedrock Titan Embed v2 |
 |--------|-------------------------------|---------------------------|
 | **Cost per 1K tokens** | $0.00002 | ~$0.0000125 (~37% cheaper) |
 | **Cost per 1M tokens** | $20.00 | $12.50 |
@@ -89,7 +89,7 @@ const response = await fetch('https://api.openai.com/v1/embeddings', {
 ```typescript
 // Pure AWS SDK, no secrets
 const command = new InvokeModelCommand({
-    modelId: 'amazon.titan-embed-text-v1',
+    modelId: 'amazon.titan-embed-text-v2:0',
     contentType: 'application/json',
     accept: 'application/json',
     body: JSON.stringify({ inputText: text })
@@ -127,7 +127,7 @@ embeddingProcessorHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
     effect: iam.Effect.ALLOW,
     actions: ['bedrock:InvokeModel'],
     resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v1`
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`
     ]
 }));
 ```
@@ -157,9 +157,9 @@ embeddingProcessorHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
 - ✅ **IAM Validation**: Hierarchical role naming works correctly
 
 ### Embedding Quality
-- **Dimensions**: 1536 (same as OpenAI)
-- **Quality**: Similar semantic representation
-- **Compatibility**: Drop-in replacement for vector storage
+- **Dimensions**: 1024 (default, configurable to 512/256)
+- **Quality**: High-quality semantic representation
+- **Compatibility**: Suitable replacement for vector storage
 
 ## 🚀 Next Steps
 

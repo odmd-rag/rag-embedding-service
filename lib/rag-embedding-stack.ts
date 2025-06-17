@@ -120,7 +120,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         // S3 poller Lambda (polls processed content bucket for new files)
         const s3PollerHandler = new NodejsFunction(this, 'EmbeddingS3PollerHandler', {
             functionName: `rag-embedding-s3-poller-${this.account}-${this.region}`,
-            runtime: lambda.Runtime.NODEJS_18_X,
+            runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
             entry: 'lib/handlers/src/embedding-s3-poller.ts',
             timeout: cdk.Duration.minutes(15),
@@ -149,7 +149,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)
         const embeddingProcessorHandler = new NodejsFunction(this, 'EmbeddingProcessorHandler', {
             functionName: `rag-embedding-processor-${this.account}-${this.region}`,
-            runtime: lambda.Runtime.NODEJS_18_X,
+            runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
             entry: 'lib/handlers/src/embedding-processor.ts',
             timeout: cdk.Duration.minutes(15),
@@ -173,7 +173,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         // DLQ handler Lambda (processes failed messages)
         const dlqHandlerHandler = new NodejsFunction(this, 'DlqHandlerHandler', {
             functionName: `rag-embedding-dlq-handler-${this.account}-${this.region}`,
-            runtime: lambda.Runtime.NODEJS_18_X,
+            runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
             entry: 'lib/handlers/src/dlq-handler.ts',
             timeout: cdk.Duration.seconds(30),

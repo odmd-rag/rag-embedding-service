@@ -143,7 +143,7 @@ export class RagEmbeddingStack extends cdk.Stack {
                 SERVICE_ID: 'embedding-processor-1',
                 AWS_ACCOUNT_ID: this.account,
             },
-            reservedConcurrentExecutions: 1, // Ensure sequential processing
+            // reservedConcurrentExecutions: 1, // Ensure sequential processing
         });
 
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)

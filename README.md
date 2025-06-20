@@ -4,7 +4,7 @@
 
 ## Architecture Overview
 
-The RAG Embedding Service is a **serverless AWS service** that generates vector embeddings from processed document chunks using **AWS Bedrock Titan Embed models**. It leverages hierarchical IAM role naming for secure cross-service access and uses S3 polling for reliable data ingestion.
+The RAG Embedding Service is a **serverless AWS service** that generates vector embeddings from processed document chunks using **AWS Bedrock Titan Embed models**. It leverages hierarchical IAM role naming for secure cross-service access and uses S3 polling for reliable data ingestion. In the **hybrid architecture**, the embeddings are ultimately stored in a home vector server via the Vector Storage Service proxy, providing 98% cost savings over traditional cloud vector databases.
 
 ### Key Components
 
@@ -49,7 +49,9 @@ This service processes document chunks from the document processing service usin
 ```
 S3 Processed Content Bucket → EventBridge Scheduler → S3 Poller Lambda → SQS Queue → Embedding Processor Lambda → S3 Embeddings Bucket
                                    ↓                                           ↓                                              ↓
-                            DynamoDB Checkpoint Table                  Dead Letter Queue                            Vector Storage Service
+                            DynamoDB Checkpoint Table                  Dead Letter Queue                  Vector Storage Service (Proxy)
+                                                                                                                     ↓
+                                                                                                            Home Vector Server
 ```
 
 ### **Key Components**

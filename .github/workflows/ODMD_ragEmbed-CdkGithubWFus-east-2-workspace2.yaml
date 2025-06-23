@@ -1,0 +1,78 @@
+#ODMD GENERATED WORKFLOW, don't change unless you are sure
+
+name: ODMD_ragEmbed-CdkGithubWFus-east-2-workspace2
+on:
+  workflow_dispatch:
+    inputs:
+      aws_credentials:
+        type: string
+        required: false
+        default: ''
+        description: | 
+          Your AWS credentials in the format:
+          [workspace2_Role/Profile]
+          aws_access_key_id=01234_id
+          aws_secret_access_key=56689_secret
+          aws_session_token=token0123456789
+      message:
+        type: string
+        required: false
+        default: ''
+        description: 'additional message'
+      ghWflPpStackName:
+        type: string
+        required: false
+        default: ''
+        description: 'the stack to reload, ignored by default'
+jobs:
+  odmd_job:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.ref }}
+      
+      - uses: ondemandenv/wflact-resolvEnvars@main
+        with:
+          aws_credentials: ${{github.event.inputs.aws_credentials}}
+          trigger_message: ${{github.event.inputs.message}}
+        env:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ODMD_buildId: ragEmbed
+          ODMD_awsRegion: us-east-2
+          ODMD_SECRETS: ${{ secrets['ODMD_SECRETS_ODMD_ragEmbed_CdkGithubWFus_east_2_workspace2'] }}
+      
+      - name: run enver local script
+        run: |
+          set -ex
+          
+          if [[ -n "${{ env.ODMD_work_dir }}" ]]; then
+            cd "${{ env.ODMD_work_dir }}"
+          else
+            echo "ODMD_work_dir is empty, staying in current directory"
+            ls -ltarh
+          fi
+          
+          pwd
+          env | grep -i ^ODMD
+          
+          if [ -f ${{ env.ODMD_buildScript }} ]; then
+            chmod +x ${{ env.ODMD_buildScript }}
+            ./${{ env.ODMD_buildScript }}
+          else
+            echo "${{ env.ODMD_buildScript }} does not exist, continue ..."
+          fi
+          
+        env:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ODMD_buildId: ragEmbed
+          ODMD_SECRETS: ${{ secrets['ODMD_SECRETS_ODMD_ragEmbed_CdkGithubWFus_east_2_workspace2'] }}      
+          
+      - uses: ondemandenv/wflact-buildProduces@main
+        env:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ODMD_buildId: ragEmbed
+          ODMD_SECRETS: ${{ secrets['ODMD_SECRETS_ODMD_ragEmbed_CdkGithubWFus_east_2_workspace2'] }}
+
+#

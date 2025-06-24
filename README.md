@@ -4,19 +4,19 @@
 
 ## Architecture Overview
 
-The RAG Embedding Service is a **serverless AWS service** that generates vector embeddings from processed document chunks using **AWS Bedrock Titan Embed models**. It leverages hierarchical IAM role naming for secure cross-service access and uses S3 polling for reliable data ingestion. In the **hybrid architecture**, the embeddings are ultimately stored in a home vector server via the Vector Storage Service proxy, providing 98% cost savings over traditional cloud vector databases.
+The RAG Embedding Service is a **serverless AWS service** that generates vector embeddings from processed document chunks using **AWS Bedrock Titan Embed models**. It leverages hierarchical IAM role naming for secure cross-service access and uses S3 polling for reliable data ingestion. The embeddings are stored in S3 and consumed by the **Vector Storage Service**, which manages the vector database operations.
 
 ### Key Components
 
-1. **S3 Poller Lambda**: Monitors document processing bucket for new content
-2. **SQS Queue**: Decouples polling from processing for reliable message handling  
-3. **Embedding Processor Lambda**: Generates embeddings via **AWS Bedrock API**, stores results in S3
-4. **DLQ Handler**: Processes failed embedding attempts with error analysis
+1. **S3 Poller Lambda** (`EmbS3PollerHandler`): Monitors document processing bucket for new content
+2. **SQS Queue** (`EmbProcessingQueue`): Decouples polling from processing for reliable message handling  
+3. **Embedding Processor Lambda** (`EmbProcessorHandler`): Generates embeddings via **AWS Bedrock API**, stores results in S3
+4. **DLQ Handler** (`EmbDlqHandler`): Processes failed embedding attempts with error analysis
 5. **Status Tracking**: Separate S3 bucket for processing status and monitoring
 
 ### Technology Stack
 
-- **AWS Bedrock**: AI service for **Titan Embed text-v1** model access
+- **AWS Bedrock**: AI service for **Titan Embed text-v2** model access
 - **AWS Lambda**: Serverless compute for stateless embedding generation
 - **Amazon S3**: Storage for embeddings and processing status
 - **Amazon SQS**: Message queuing for reliable processing
@@ -25,9 +25,9 @@ The RAG Embedding Service is a **serverless AWS service** that generates vector 
 
 ## Embedding Model Details
 
-### AWS Bedrock Titan Embed v1
-- **Model ID**: `amazon.titan-embed-text-v1`
-- **Dimensions**: 1536 (same as OpenAI text-embedding-3-small)
+### AWS Bedrock Titan Embed v2
+- **Model ID**: `amazon.titan-embed-text-v2:0`
+- **Dimensions**: 1024 (optimized for cost and performance)
 - **Max Input**: 8,192 tokens per request
 - **Cost**: ~90% cheaper than OpenAI API
 - **Latency**: Typically 200-500ms per request
@@ -42,25 +42,22 @@ The RAG Embedding Service is a **serverless AWS service** that generates vector 
 
 ## 🏗️ Architecture Overview
 
-### **S3 Polling + SQS Architecture**
-
-This service processes document chunks from the document processing service using S3 polling and SQS queuing:
+### **Data Flow**
 
 ```
-S3 Processed Content Bucket → EventBridge Scheduler → S3 Poller Lambda → SQS Queue → Embedding Processor Lambda → S3 Embeddings Bucket
-                                   ↓                                           ↓                                              ↓
-                            DynamoDB Checkpoint Table                  Dead Letter Queue                  Vector Storage Service (Proxy)
-                                                                                                                     ↓
-                                                                                                            Home Vector Server
+Document Processing Service → Processed Content S3 Bucket → EventBridge Scheduler → S3 Poller Lambda → SQS Queue → Embedding Processor Lambda → Embeddings S3 Bucket → Vector Storage Service
+                                                ↓                                           ↓                                              ↓
+                                         DynamoDB Checkpoint Table                   Dead Letter Queue                    Status API (WebUI Integration)
 ```
 
-### **Key Components**
+### **NOT** Connected to Home Vector Server
 
-- **S3 Poller Lambda**: Polls processed content bucket, sends chunks to embedding queue
-- **Embedding Processor Lambda**: Generates embeddings via OpenAI API, stores results in S3
-- **SQS Queue**: Embedding task queue with 3-retry DLQ configuration
-- **DynamoDB Checkpoint Table**: Tracks processing progress for reliable polling
-- **S3 Buckets**: Input (processed content) and output (embeddings) storage
+**Important**: The embedding service does **NOT** directly connect to the home vector server. The data flow is:
+
+1. **Embedding Service** → Stores embeddings in S3
+2. **Vector Storage Service** → Reads embeddings from S3 → Stores in vector database (which could be the home vector server)
+
+The **home-vector-server** is a separate development tool, not part of the main ondemandenv.dev pipeline.
 
 ## 🎯 OndemandEnv Integration
 
@@ -73,25 +70,23 @@ This service follows OndemandEnv platform patterns:
 ### **Contract Implementation**
 ```typescript
 // Consuming from document processing service
-const processedContentBucketName = getSharedValue(
-    myEnver.processedContentSubscription,
-    'rag-processed-content-default'
-);
+const processedContentBucketName = myEnver.processedContentSubscription.getSharedValue(this);
 
 // Producing for vector storage service
 new OdmdShareOut(this, new Map([
     [myEnver.embeddingStorage.embeddingsBucket, embeddingsBucket.bucketName],
     [myEnver.embeddingStorage.embeddingStatusBucket, embeddingStatusBucket.bucketName],
+    [myEnver.statusApi.statusApiEndpoint, `https://${this.apiDomain}/status`],
 ]));
 ```
 
 ## 🚀 Features
 
 ### **Embedding Generation**
-- **OpenAI Integration**: Uses `text-embedding-3-small` model for high-quality embeddings
+- **AWS Bedrock Integration**: Uses `amazon.titan-embed-text-v2:0` model for high-quality embeddings
 - **Batch Processing**: Processes multiple chunks in parallel with configurable batch sizes
 - **Checkpoint Recovery**: Resumes processing from last checkpoint after failures
-- **Cost Optimization**: Efficient token usage and API rate limiting
+- **Cost Optimization**: Efficient token usage and no external API costs
 
 ### **Serverless Benefits**
 - **No VPC**: Pure Lambda functions for maximum scalability
@@ -109,28 +104,27 @@ new OdmdShareOut(this, new Map([
 
 ### **Prerequisites**
 ```bash
-# Node.js 18+ and npm
-node --version  # >= 18.0.0
+# Node.js 22+ and npm
+node --version  # >= 22.0.0
 npm --version
 
 # AWS CDK CLI
 npm install -g aws-cdk
 cdk --version   # >= 2.110.0
 
-# OpenAI API Key
-# Store in AWS Secrets Manager: rag/openai-api-key
+# AWS Bedrock Access
+# Ensure your AWS account has Bedrock enabled in the target region
 ```
 
 ### **Setup**
 ```bash
-# Clone repository
-git clone https://github.com/odmd-rag/rag-embedding-service.git
-cd rag-embedding-service
-
 # Install dependencies
 npm install
 
-# Build TypeScript
+# Build handlers project
+npm run build:handlers
+
+# Build main project
 npm run build
 ```
 
@@ -212,9 +206,9 @@ Each chunk becomes an embedding task:
 
 ### **4. Embedding Generation**
 The Embedding Processor Lambda:
-- Retrieves OpenAI API key from Secrets Manager
-- Calls OpenAI embeddings API with chunk content
-- Generates 1536-dimensional embedding vectors
+- Uses AWS Bedrock Titan Embed v2 model
+- Calls Bedrock API with chunk content via IAM role
+- Generates 1024-dimensional embedding vectors
 
 ### **5. Result Storage**
 Embeddings are stored in S3 as JSON files:
@@ -225,14 +219,14 @@ Embeddings are stored in S3 as JSON files:
   "processingId": "uuid", 
   "chunkId": "uuid",
   "chunkIndex": 0,
-  "embedding": [0.1, 0.2, 0.3, ...], // 1536 dimensions
+  "embedding": [0.1, 0.2, 0.3, ...], // 1024 dimensions
   "content": "First chunk content...",
   "originalDocumentInfo": { ... },
   "embeddingMetadata": {
-    "model": "text-embedding-3-small",
-    "dimensions": 1536,
+    "model": "amazon.titan-embed-text-v2:0",
+    "dimensions": 1024,
     "tokenCount": 245,
-    "processingTimeMs": 1200
+    "processingTimeMs": 800
   },
   "processedAt": "2024-01-01T12:00:05Z",
   "source": "processed-content-polling"
@@ -245,7 +239,7 @@ Embeddings are stored in S3 as JSON files:
 
 #### **S3 Poller Lambda**
 ```bash
-PROCESSED_CONTENT_BUCKET_NAME=rag-document-processing-content-account-region
+PROCESSED_CONTENT_BUCKET_NAME=rag-processed-content-account-region
 EMBEDDINGS_BUCKET_NAME=rag-embeddings-account-region
 EMBEDDING_QUEUE_URL=https://sqs.region.amazonaws.com/account/rag-embedding-processing-queue-account-region
 CHECKPOINT_TABLE_NAME=rag-embedding-checkpoint-account-region
@@ -261,17 +255,17 @@ EMBEDDING_STATUS_BUCKET_NAME=rag-embedding-status-account-region
 AWS_ACCOUNT_ID=123456789012
 ```
 
-### **OpenAI Configuration**
+### **AWS Bedrock Configuration**
 ```typescript
-const embeddingModel = 'text-embedding-3-small'; // 1536 dimensions
-const maxTokens = 8191; // Model limit
+const embeddingModel = 'amazon.titan-embed-text-v2:0'; // 1024 dimensions
+const maxTokens = 8192; // Model limit
 const apiTimeout = 30000; // 30 seconds
 ```
 
 ### **Polling Configuration**
 ```typescript
 const pollingInterval = 1; // minute
-const batchSize = 1000; // files per batch
+const batchSize = 50; // files per batch
 const checkpointStrategy = 'contiguous'; // Only update on successful processing
 ```
 
@@ -281,7 +275,7 @@ const checkpointStrategy = 'contiguous'; // Only update on successful processing
 - **ProcessedContentFiles**: Number of files processed per invocation
 - **EmbeddingTasksQueued**: Number of chunks sent to embedding queue
 - **EmbeddingGenerationTime**: Time to generate embeddings
-- **OpenAIAPIErrors**: Failed API calls to OpenAI
+- **BedrockAPIErrors**: Failed API calls to Bedrock
 - **CheckpointLag**: Time between file creation and processing
 
 ### **CloudWatch Logs**
@@ -308,34 +302,35 @@ Structured logging with request IDs for tracing:
 
 ### **IAM Permissions**
 
-#### **S3 Poller Lambda**
+#### **S3 Poller Lambda** (`EmbS3PollerRole`)
 - `s3:ListBucket` on processed content bucket
 - `s3:GetObject` on processed content bucket
 - `dynamodb:GetItem`, `dynamodb:PutItem` on checkpoint table
 - `sqs:SendMessage` on embedding queue
 
-#### **Embedding Processor Lambda**
+#### **Embedding Processor Lambda** (`EmbProcessorRole`)
 - `s3:PutObject` on embeddings bucket
 - `s3:PutObject` on embedding status bucket
-- `secretsmanager:GetSecretValue` on OpenAI API key secret
+- `bedrock:InvokeModel` on Titan Embed model
 
 ### **Cross-Service Access**
 ```typescript
 // Bucket policy for vector storage service access
-const crossServiceBucketPolicy = new iam.PolicyStatement({
-  sid: 'AllowRAGServiceAccess',
-  effect: iam.Effect.ALLOW,
-  principals: [new iam.AccountPrincipal(this.account)],
-  actions: ['s3:GetObject', 's3:ListBucket'],
-  resources: [embeddingsBucket.bucketArn, `${embeddingsBucket.bucketArn}/*`],
-  conditions: {
-    'StringLike': {
-      'aws:PrincipalArn': [
-        `arn:aws:iam::${this.account}:role/RagVectorStorageStack-VectorStorageEmbeddingsPoller*`
-      ]
+embeddingsBucket.addToResourcePolicy(new iam.PolicyStatement({
+    sid: 'AllowVectorStorageServiceAccess',
+    effect: iam.Effect.ALLOW,
+    principals: [new iam.AccountPrincipal(this.account)],
+    actions: ['s3:GetObject', 's3:ListBucket'],
+    resources: [embeddingsBucket.bucketArn, `${embeddingsBucket.bucketArn}/*`],
+    conditions: {
+        'StringLike': {
+            'aws:PrincipalArn': [
+                `arn:aws:iam::${this.account}:role/RagVectorStorageStack-EmbeddingPoller*`,
+                `arn:aws:iam::${this.account}:role/RagVectorStorageStack-VectorProcessor*`
+            ]
+        }
     }
-  }
-});
+}));
 ```
 
 ## 🧪 Testing
@@ -364,15 +359,6 @@ npm run test:integration:embeddings
 npm run test:e2e
 ```
 
-### **Load Testing**
-```bash
-# Generate test processed content files
-npm run test:load:generate
-
-# Monitor processing performance
-npm run test:load:monitor
-```
-
 ## 🚨 Troubleshooting
 
 ### **Common Issues**
@@ -383,20 +369,20 @@ npm run test:load:monitor
 aws s3 ls s3://rag-processed-content-{account}-{region}/
 
 # Check checkpoint table
-aws dynamodb get-item --table-name rag-embedding-checkpoints-{account}-{region} \
+aws dynamodb get-item --table-name rag-embedding-checkpoint-{account}-{region} \
   --key '{"serviceId": {"S": "embedding-processor-1"}}'
 
 # Check S3 poller logs
-aws logs tail /aws/lambda/rag-embedding-processed-content-poller-{account}-{region}
+aws logs tail /aws/lambda/rag-embedding-s3-poller-{account}-{region}
 ```
 
-#### **OpenAI API Errors**
+#### **Bedrock API Errors**
 ```bash
-# Verify API key exists
-aws secretsmanager get-secret-value --secret-id rag/openai-api-key
-
 # Check embedding processor logs
 aws logs tail /aws/lambda/rag-embedding-processor-{account}-{region}
+
+# Verify Bedrock access in region
+aws bedrock list-foundation-models --region {region}
 
 # Monitor API rate limits
 aws cloudwatch get-metric-statistics --namespace AWS/Lambda \
@@ -413,29 +399,12 @@ aws cloudwatch get-metric-statistics --namespace AWS/Lambda \
 aws s3api head-object --bucket rag-processed-content-{account}-{region} --key {object-key}
 ```
 
-### **Performance Tuning**
-
-#### **Batch Size Optimization**
-```typescript
-// Adjust based on available memory and processing speed
-const optimalBatchSize = Math.min(
-  availableMemoryMB / estimatedMemoryPerFile,
-  maxProcessingTimeSeconds / averageProcessingTimePerFile
-);
-```
-
-#### **Concurrency Settings**
-```typescript
-// SQS batch size for embedding processor
-const sqsBatchSize = 10; // Process 10 chunks at once
-const maxBatchingWindow = Duration.seconds(5); // Wait up to 5 seconds to fill batch
-```
-
 ## 🔄 Deployment Pipeline
 
 ### **Development**
 ```bash
 # Local development
+npm run build:handlers
 npm run build
 npm test
 npx cdk diff
@@ -447,27 +416,35 @@ npx cdk deploy --profile dev
 ### **Production**
 ```bash
 # Build and test
+npm run build:handlers
 npm run build
-npm run test:all
-npm run test:integration
-
-# Deploy to staging
-npx cdk deploy --profile staging --require-approval never
-
-# Run smoke tests
-npm run test:smoke:staging
+npm test
 
 # Deploy to production
-npx cdk deploy --profile production --require-approval never
+npx cdk deploy --profile prod --require-approval never
 ```
 
-## 📚 Related Documentation
+## 📊 CDK Construct Naming Convention
 
-- [Processed Content Format](../rag-document-processing-service/PROCESSED_CONTENT_FORMAT.md)
-- [Downstream Flow](../rag-document-processing-service/DOWNSTREAM_FLOW.md)
-- [Vector Storage Service](../rag-vector-storage-service/README.md)
-- [RAG Architecture Overview](../README.md)
+All CDK constructs use the "Emb" prefix for consistency:
 
-## 📄 License
+- **Tables**: `EmbCheckpointTable`
+- **Queues**: `EmbProcessingQueue`, `EmbProcessingDlq`
+- **Buckets**: `EmbBucket`, `EmbStatusBucket`
+- **Lambda Functions**: `EmbS3PollerHandler`, `EmbProcessorHandler`, `EmbDlqHandler`
+- **IAM Roles**: `EmbS3PollerRole`, `EmbProcessorRole`, `EmbDlqRole`
+- **API Gateway**: `EmbApi`, `EmbStatusHandler`
+- **CloudWatch Alarms**: `EmbDlqAlarm`, `EmbProcessorErrorAlarm`
 
-MIT License - see [LICENSE](LICENSE) file for details. 
+This naming convention ensures clear identification of resources and maintains consistency across the service.
+
+## 🔗 Related Services
+
+- **Document Processing Service**: Provides processed content input
+- **Vector Storage Service**: Consumes embeddings output
+- **ContractsLib RAG**: Defines service contracts and dependencies
+- **User Auth**: Provides JWT authentication for status API
+
+## License
+
+This project is licensed under the MIT License. 

@@ -9,20 +9,35 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import {HttpJwtAuthorizer} from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import {Certificate, CertificateValidation} from "aws-cdk-lib/aws-certificatemanager";
+import {ARecord, HostedZone, RecordTarget} from "aws-cdk-lib/aws-route53";
+import {ApiGatewayv2DomainProperties} from "aws-cdk-lib/aws-route53-targets";
 
 import {NodejsFunction} from 'aws-cdk-lib/aws-lambda-nodejs';
 import {RagEmbeddingEnver} from '@odmd-rag/contracts-lib-rag';
 import {OdmdShareOut} from '@ondemandenv/contracts-lib-base';
-import { Duration } from 'aws-cdk-lib';
+import {StackProps} from "aws-cdk-lib";
 
-export interface RagEmbeddingStackProps extends cdk.StackProps {
-}
 
 export class RagEmbeddingStack extends cdk.Stack {
+    readonly httpApi: apigatewayv2.HttpApi;
+    readonly apiDomain: string;
 
-    constructor(scope: Construct, myEnver: RagEmbeddingEnver, props: RagEmbeddingStackProps) {
+    readonly zoneName: string;
+    readonly hostedZoneId: string;
+
+    constructor(scope: Construct, myEnver: RagEmbeddingEnver, props: StackProps) {
         const id = myEnver.getRevStackNames()[0];
-        super(scope, id, props);
+        super(scope, id, {...props, crossRegionReferences: props.env!.region !== 'us-east-1'});
+
+        this.hostedZoneId = 'Z01450892FNOJJT5BBBRU';
+        this.zoneName = 'rag-ws1.root.ondemandenv.link';
+
+        const apiSubdomain = ('eb-api.' + myEnver.targetRevision.value + '.' + myEnver.owner.buildId).toLowerCase()
+        this.apiDomain = `${apiSubdomain}.${this.zoneName}`;
 
         // === CONSUMING from document processing service via OndemandEnv contracts ===
         const processedContentBucketName = myEnver.processedContentSubscription.getSharedValue(this);
@@ -31,9 +46,9 @@ export class RagEmbeddingStack extends cdk.Stack {
         // Bedrock is fully integrated with AWS IAM, no API keys required!
 
         // === DYNAMODB TABLE FOR CHECKPOINT TRACKING ===
-        const checkpointTable = new dynamodb.Table(this, 'EmbeddingCheckpointTable', {
+        const checkpointTable = new dynamodb.Table(this, 'EmbCheckpointTable', {
             tableName: `rag-embedding-checkpoint-${this.account}-${this.region}`,
-            partitionKey: { name: 'serviceId', type: dynamodb.AttributeType.STRING },
+            partitionKey: {name: 'serviceId', type: dynamodb.AttributeType.STRING},
             billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             pointInTimeRecoverySpecification: {
@@ -44,13 +59,13 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === SQS QUEUES FOR EMBEDDING PROCESSING ===
 
         // Dead Letter Queue for failed embedding attempts
-        const embeddingProcessingDlq = new sqs.Queue(this, 'EmbeddingProcessingDLQ', {
+        const embeddingProcessingDlq = new sqs.Queue(this, 'EmbProcessingDlq', {
             queueName: `rag-embedding-processing-dlq-${this.account}-${this.region}`,
             retentionPeriod: cdk.Duration.days(14),
         });
 
         // Main embedding processing queue
-        const embeddingProcessingQueue = new sqs.Queue(this, 'EmbeddingProcessingQueue', {
+        const embeddingProcessingQueue = new sqs.Queue(this, 'EmbProcessingQueue', {
             queueName: `rag-embedding-processing-queue-${this.account}-${this.region}`,
             visibilityTimeout: cdk.Duration.minutes(15), // Lambda timeout limit
             retentionPeriod: cdk.Duration.days(7),
@@ -63,7 +78,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === S3 BUCKETS FOR EMBEDDINGS STORAGE ===
 
         // S3 bucket for embeddings (consumed by vector storage service)
-        const embeddingsBucket = new s3.Bucket(this, 'EmbeddingsBucket', {
+        const embeddingsBucket = new s3.Bucket(this, 'EmbBucket', {
             bucketName: `rag-embeddings-${this.account}-${this.region}`,
             versioned: false,
             removalPolicy: cdk.RemovalPolicy.DESTROY, // For development
@@ -78,7 +93,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // S3 bucket for embedding status/completion events
-        const embeddingStatusBucket = new s3.Bucket(this, 'EmbeddingStatusBucket', {
+        const embeddingStatusBucket = new s3.Bucket(this, 'EmbStatusBucket', {
             bucketName: `rag-embedding-status-${this.account}-${this.region}`,
             versioned: false,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -118,15 +133,15 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === LAMBDA FUNCTIONS ===
 
         // S3 poller Lambda (polls processed content bucket for new files)
-        const s3PollerHandler = new NodejsFunction(this, 'EmbeddingS3PollerHandler', {
+        const s3PollerHandler = new NodejsFunction(this, 'EmbS3PollerHandler', {
             functionName: `rag-embedding-s3-poller-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
-            entry: 'lib/handlers/src/embedding-s3-poller.ts',
+            entry: 'lib/handlers/dist/embedding-s3-poller.js',
             timeout: cdk.Duration.minutes(15),
             memorySize: 1024,
             logRetention: logs.RetentionDays.ONE_WEEK,
-            role: new iam.Role(this, 'EmbeddingS3PollerRole', {
+            role: new iam.Role(this, 'EmbS3PollerRole', {
                 path: '/rag/embedding/',                                                   // ← Hierarchical path
                 roleName: `s3-poller-${this.account}-${this.region}`,                    // ← Role name only
                 assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -147,15 +162,15 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)
-        const embeddingProcessorHandler = new NodejsFunction(this, 'EmbeddingProcessorHandler', {
+        const embeddingProcessorHandler = new NodejsFunction(this, 'EmbProcessorHandler', {
             functionName: `rag-embedding-processor-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
-            entry: 'lib/handlers/src/embedding-processor.ts',
+            entry: 'lib/handlers/dist/embedding-processor.js',
             timeout: cdk.Duration.minutes(15),
             memorySize: 2048,
             logRetention: logs.RetentionDays.ONE_WEEK,
-            role: new iam.Role(this, 'EmbeddingProcessorRole', {
+            role: new iam.Role(this, 'EmbProcessorRole', {
                 path: '/rag/embedding/',                                                 // ← Hierarchical path
                 roleName: `processor-${this.account}-${this.region}`,                   // ← Role name only
                 assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -171,15 +186,15 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // DLQ handler Lambda (processes failed messages)
-        const dlqHandlerHandler = new NodejsFunction(this, 'DlqHandlerHandler', {
+        const dlqHandlerHandler = new NodejsFunction(this, 'EmbDlqHandler', {
             functionName: `rag-embedding-dlq-handler-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
-            entry: 'lib/handlers/src/dlq-handler.ts',
+            entry: 'lib/handlers/dist/dlq-handler.js',
             timeout: cdk.Duration.seconds(30),
             memorySize: 512,
             logRetention: logs.RetentionDays.ONE_WEEK,
-            role: new iam.Role(this, 'DlqHandlerRole', {
+            role: new iam.Role(this, 'EmbDlqRole', {
                 path: '/rag/embedding/',                                                 // ← Hierarchical path
                 roleName: `dlq-handler-${this.account}-${this.region}`,                 // ← Role name only
                 assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -195,7 +210,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // === EVENTBRIDGE SCHEDULED RULE FOR S3 POLLING ===
-        const s3PollingRule = new events.Rule(this, 'S3PollingRule', {
+        const s3PollingRule = new events.Rule(this, 'EmbS3PollingRule', {
             ruleName: `rag-embedding-s3-polling-${this.account}-${this.region}`,
             description: 'Triggers S3 poller Lambda every minute',
             schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
@@ -219,7 +234,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === IAM PERMISSIONS ===
 
         // S3 poller permissions
-        s3.Bucket.fromBucketName(this, 'ProcessedContentBucket', processedContentBucketName)
+        s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName)
             .grantRead(s3PollerHandler);
         embeddingProcessingQueue.grantSendMessages(s3PollerHandler);
         checkpointTable.grantReadWriteData(s3PollerHandler);
@@ -228,7 +243,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         embeddingsBucket.grantWrite(embeddingProcessorHandler);
         embeddingStatusBucket.grantWrite(embeddingProcessorHandler);
         embeddingProcessingQueue.grantConsumeMessages(embeddingProcessorHandler);
-        
+
         // Add Bedrock permissions for embedding generation
         embeddingProcessorHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
@@ -244,21 +259,13 @@ export class RagEmbeddingStack extends cdk.Stack {
         embeddingProcessingDlq.grantConsumeMessages(dlqHandlerHandler);
         embeddingStatusBucket.grantWrite(dlqHandlerHandler);
 
-        // === ONDEMANDENV SHARE OUT (PRODUCING) ===
-
-        new OdmdShareOut(
-            this, new Map([
-                // S3 bucket names for embeddings storage (consumed by vector storage service)
-                [myEnver.embeddingStorage.embeddingsBucket, embeddingsBucket.bucketName],
-                [myEnver.embeddingStorage.embeddingStatusBucket, embeddingStatusBucket.bucketName],
-            ])
-        );
+        // === ONDEMANDENV SHARE OUT (PRODUCING) - Moved to end of constructor ===
 
         // === CLOUDWATCH ALARMS (Optional) ===
-        
+
         // Alarm for DLQ messages
         const dlqAlarm = embeddingProcessingDlq.metricApproximateNumberOfMessagesVisible()
-            .createAlarm(this, 'EmbeddingDlqAlarm', {
+            .createAlarm(this, 'EmbDlqAlarm', {
                 threshold: 5,
                 evaluationPeriods: 2,
                 alarmDescription: 'Embedding processing DLQ has messages',
@@ -266,26 +273,133 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // Alarm for embedding processor errors
         const processorErrorAlarm = embeddingProcessorHandler.metricErrors()
-            .createAlarm(this, 'EmbeddingProcessorErrorAlarm', {
+            .createAlarm(this, 'EmbProcessorErrorAlarm', {
                 threshold: 10,
                 evaluationPeriods: 2,
                 alarmDescription: 'High error rate in embedding processor',
             });
 
         // === STACK OUTPUTS ===
-        new cdk.CfnOutput(this, 'EmbeddingsBucketName', {
+        new cdk.CfnOutput(this, 'EmbBucketName', {
             value: embeddingsBucket.bucketName,
             description: 'S3 bucket containing generated embeddings',
         });
 
-        new cdk.CfnOutput(this, 'EmbeddingProcessingQueueUrl', {
+        new cdk.CfnOutput(this, 'EmbProcessingQueueUrl', {
             value: embeddingProcessingQueue.queueUrl,
             description: 'SQS queue for embedding processing tasks',
         });
 
-        new cdk.CfnOutput(this, 'CheckpointTableName', {
+        new cdk.CfnOutput(this, 'EmbCheckpointTableName', {
             value: checkpointTable.tableName,
             description: 'DynamoDB table for S3 polling checkpoints',
         });
+
+        const ingestionEnver = myEnver.processedContentSubscription.producer.owner
+
+        // CORS configuration
+        const allowedOrigins = ['http://localhost:5173'];
+        const webUiDomain = `https://up.${ingestionEnver.targetRevision.value}.${ingestionEnver.owner.buildId}.${this.zoneName}`.toLowerCase();
+        allowedOrigins.push(`https://${webUiDomain}`);
+
+        // FIXME: Auth provider details need to be properly consumed from contracts
+        // The authProviderClientId and authProviderName properties exist in the contract 
+        // but are not properly accessible. This needs to be resolved in contractsLib.
+        const clientId = 'PLACEHOLDER_CLIENT_ID';
+        const providerName = 'PLACEHOLDER_PROVIDER_NAME';
+
+        // HTTP API Gateway with JWT authentication
+        this.httpApi = new apigatewayv2.HttpApi(this, 'EmbApi', {
+            apiName: 'RAG Embedding Service',
+            description: 'HTTP API for RAG embedding service status with JWT authentication',
+            defaultAuthorizer: new HttpJwtAuthorizer('Auth',
+                `https://${providerName}`,
+                {jwtAudience: [clientId]}
+            ),
+            corsPreflight: {
+                allowOrigins: allowedOrigins,
+                allowMethods: [apigatewayv2.CorsHttpMethod.GET, apigatewayv2.CorsHttpMethod.OPTIONS],
+                allowHeaders: [
+                    'Content-Type',
+                    'X-Amz-Date',
+                    'Authorization',
+                    'X-Api-Key',
+                    'X-Amz-Security-Token',
+                    'X-Amz-User-Agent',
+                    'Host',
+                    'Cache-Control',
+                    'Pragma'
+                ],
+                allowCredentials: false,
+                exposeHeaders: ['Date', 'X-Amzn-ErrorType'],
+                maxAge: cdk.Duration.hours(1),
+            },
+        });
+
+        // Status endpoint
+        this.httpApi.addRoutes({
+            path: '/status/{documentId}',
+            methods: [apigatewayv2.HttpMethod.GET],
+            integration: new apigatewayv2Integrations.HttpLambdaIntegration('EmbStatusIntegration', new NodejsFunction(this, 'EmbStatusHandler', {
+                entry: __dirname + '/handlers/dist/status-handler.js',
+                runtime: lambda.Runtime.NODEJS_22_X,
+                timeout: cdk.Duration.seconds(30),
+                memorySize: 256,
+                environment: {
+                    EMBEDDINGS_BUCKET: embeddingsBucket.bucketName,
+                    EMBEDDING_STATUS_BUCKET: embeddingStatusBucket.bucketName,
+                    PROCESSED_CONTENT_BUCKET: processedContentBucketName,
+                },
+            })),
+        });
+
+        // Set up custom domain for API Gateway
+        const hostedZone = HostedZone.fromHostedZoneAttributes(this, 'EmbApiHostedZone', {
+            hostedZoneId: this.hostedZoneId,
+            zoneName: this.zoneName,
+        });
+
+        const domainName = new apigatewayv2.DomainName(this, 'EmbApiDomainName', {
+            domainName: this.apiDomain,
+            certificate: new Certificate(this, 'EmbApiCertificate', {
+                domainName: this.apiDomain,
+                validation: CertificateValidation.fromDns(hostedZone),
+            }),
+        });
+
+        new apigatewayv2.ApiMapping(this, 'EmbApiMapping', {
+            api: this.httpApi,
+            domainName: domainName,
+        });
+
+        new ARecord(this, 'EmbApiAliasRecord', {
+            zone: hostedZone,
+            target: RecordTarget.fromAlias(
+                new ApiGatewayv2DomainProperties(
+                    domainName.regionalDomainName,
+                    domainName.regionalHostedZoneId
+                )
+            ),
+            recordName: apiSubdomain,
+        });
+
+        // === OUTPUTS ===
+
+        new cdk.CfnOutput(this, 'EmbApiEndpoint', {
+            value: `https://${this.apiDomain}`,
+            exportName: `${this.stackName}-EmbApiEndpoint`,
+        });
+
+        // OndemandEnv Producers - Share values with other services
+        new OdmdShareOut(
+            this, new Map([
+                // S3 bucket resources for downstream services
+                [myEnver.embeddingStorage.embeddingsBucket, embeddingsBucket.bucketName],
+                [myEnver.embeddingStorage.embeddingStatusBucket, embeddingStatusBucket.bucketName],
+
+                // Status API endpoint for WebUI tracking
+                [myEnver.statusApi.statusApiEndpoint, `https://${this.apiDomain}/status`],
+            ])
+        );
     }
 } 

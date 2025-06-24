@@ -2,7 +2,7 @@ import { SQSEvent, SQSRecord, Context } from 'aws-lambda';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 // Initialize AWS clients
-const s3Client = new S3Client({ region: process.env.AWS_REGION });
+const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
 // Environment variables
 const EMBEDDING_STATUS_BUCKET = process.env.EMBEDDING_STATUS_BUCKET || '';

@@ -1,9 +1,9 @@
 import { Context } from 'aws-lambda';
-import { S3Client, ListObjectsV2Command, HeadObjectCommand, GetObjectCommand, PutObjectCommand, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
+import { S3Client, ListObjectsV2Command, GetObjectCommand, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
 import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { createHash } from 'crypto';
+// import { createHash } from 'crypto'; // Unused for now
 
 // Initialize AWS clients
 const s3Client = new S3Client({});

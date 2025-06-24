@@ -4,12 +4,13 @@
   "description": "RAG Embedding Service - Generates embeddings from processed document chunks",
   "main": "index.js",
   "scripts": {
-    "build": "tsc",
-    "clean": "tsc --build --clean",
+    "build": "npm run build:handlers && tsc",
+    "build:handlers": "cd lib/handlers && npm install && npm run build",
+    "clean": "npm run clean:handlers && tsc --build --clean",
+    "clean:handlers": "cd lib/handlers && npm run clean",
     "ragEmbedding-cdk-ls": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk ls --profile odmd-rag-ws1",
     "ragEmbedding-cdk-ls-deps": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk ls --show-dependencies --profile odmd-rag-ws1",
     "ragEmbedding-cdk-synth": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk synth --all --profile odmd-rag-ws1",
-    "ragEmbedding-cdk-deploy": "tsc --build && cross-env ODMD_build_id=ragEmbedding ODMD_rev_ref=b..dev cdk deploy ragEmbedding--dev --no-rollback --profile odmd-rag-ws1",
     "watch": "tsc -w",
     "test": "jest",
     "cdk": "cdk"
@@ -35,7 +36,7 @@
     "aws-lambda": "^1.0.7"
   },
   "devDependencies": {
-    "@odmd-rag/contracts-lib-rag": "1.0.14",
+    "@odmd-rag/contracts-lib-rag": "1.0.17",
     "@types/aws-lambda": "^8.10.130",
     "@types/jest": "^29.5.8",
     "@types/node": "20.10.5",

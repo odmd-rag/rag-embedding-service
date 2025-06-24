@@ -7,15 +7,13 @@ yarn-error.log*
 # Build outputs
 dist/
 build/
-lib/
 *.tsbuildinfo
 
-# TypeScript
-*.js
-*.js.map
-*.d.ts
+
+# Keep source JS files and CDK config files
 !jest.config.js
 !*.config.js
+
 
 # CDK
 cdk.out/

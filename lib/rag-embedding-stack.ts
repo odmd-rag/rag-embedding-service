@@ -137,7 +137,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             functionName: `rag-embedding-s3-poller-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
-            entry: 'lib/handlers/dist/embedding-s3-poller.js',
+            entry: 'lib/handlers/src/s3-poller.ts',
             timeout: cdk.Duration.minutes(15),
             memorySize: 1024,
             logRetention: logs.RetentionDays.ONE_WEEK,

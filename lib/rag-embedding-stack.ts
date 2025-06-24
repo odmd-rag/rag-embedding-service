@@ -295,18 +295,15 @@ export class RagEmbeddingStack extends cdk.Stack {
             description: 'DynamoDB table for S3 polling checkpoints',
         });
 
-        const ingestionEnver = myEnver.processedContentSubscription.producer.owner
+        const ingestionEnver = myEnver.processedContentSubscription.producer.owner.ingestionEnver
 
         // CORS configuration
         const allowedOrigins = ['http://localhost:5173'];
         const webUiDomain = `https://up.${ingestionEnver.targetRevision.value}.${ingestionEnver.owner.buildId}.${this.zoneName}`.toLowerCase();
         allowedOrigins.push(`https://${webUiDomain}`);
 
-        // FIXME: Auth provider details need to be properly consumed from contracts
-        // The authProviderClientId and authProviderName properties exist in the contract 
-        // but are not properly accessible. This needs to be resolved in contractsLib.
-        const clientId = 'PLACEHOLDER_CLIENT_ID';
-        const providerName = 'PLACEHOLDER_PROVIDER_NAME';
+        const clientId = ingestionEnver.authProviderClientId.getSharedValue(this);
+        const providerName = ingestionEnver.authProviderName.getSharedValue(this);
 
         // HTTP API Gateway with JWT authentication
         this.httpApi = new apigatewayv2.HttpApi(this, 'EmbApi', {

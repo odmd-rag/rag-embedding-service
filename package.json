@@ -36,7 +36,7 @@
     "aws-lambda": "^1.0.7"
   },
   "devDependencies": {
-    "@odmd-rag/contracts-lib-rag": "1.0.18",
+    "@odmd-rag/contracts-lib-rag": "1.0.19",
     "@types/aws-lambda": "^8.10.130",
     "@types/jest": "^29.5.8",
     "@types/node": "20.10.5",

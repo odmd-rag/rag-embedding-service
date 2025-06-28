@@ -1,14 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import {Construct} from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigatewayv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import {HttpJwtAuthorizer} from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -42,36 +40,26 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === CONSUMING from document processing service via OndemandEnv contracts ===
         const processedContentBucketName = myEnver.processedContentSubscription.getSharedValue(this);
 
-        // === BEDROCK PERMISSIONS (No secrets needed - uses IAM roles) ===
-        // Bedrock is fully integrated with AWS IAM, no API keys required!
-
-        // === DYNAMODB TABLE FOR CHECKPOINT TRACKING ===
-        const checkpointTable = new dynamodb.Table(this, 'EmbCheckpointTable', {
-            tableName: `rag-embedding-checkpoint-${this.account}-${this.region}`,
-            partitionKey: {name: 'serviceId', type: dynamodb.AttributeType.STRING},
-            billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-            pointInTimeRecoverySpecification: {
-                pointInTimeRecoveryEnabled: true
-            },
-        });
-
-        // === SQS QUEUES FOR EMBEDDING PROCESSING ===
-
         // Dead Letter Queue for failed embedding attempts
         const embeddingProcessingDlq = new sqs.Queue(this, 'EmbProcessingDlq', {
             queueName: `rag-embedding-processing-dlq-${this.account}-${this.region}`,
             retentionPeriod: cdk.Duration.days(14),
+            removalPolicy: cdk.RemovalPolicy.RETAIN,          // Prevent auto-deletion
         });
 
         // Main embedding processing queue
         const embeddingProcessingQueue = new sqs.Queue(this, 'EmbProcessingQueue', {
             queueName: `rag-embedding-processing-queue-${this.account}-${this.region}`,
-            visibilityTimeout: cdk.Duration.minutes(15), // Lambda timeout limit
-            retentionPeriod: cdk.Duration.days(7),
+
+            // Optimized for dynamic batching
+            visibilityTimeout: cdk.Duration.minutes(15),      // Lambda timeout * 3
+            receiveMessageWaitTime: cdk.Duration.seconds(20), // Long polling
+            retentionPeriod: cdk.Duration.days(14),           // Message durability
+            removalPolicy: cdk.RemovalPolicy.RETAIN,          // Prevent auto-deletion
+
             deadLetterQueue: {
                 queue: embeddingProcessingDlq,
-                maxReceiveCount: 3  // 3 retry attempts before DLQ
+                maxReceiveCount: 3                            // 3 retry attempts before DLQ
             }
         });
 
@@ -88,35 +76,6 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // === LAMBDA FUNCTIONS ===
-
-        // S3 poller Lambda (polls processed content bucket for new files)
-        const s3PollerHandler = new NodejsFunction(this, 'EmbS3PollerHandler', {
-            functionName: `rag-embedding-s3-poller-${this.account}-${this.region}`,
-            runtime: lambda.Runtime.NODEJS_22_X,
-            handler: 'handler',
-            entry: 'lib/handlers/src/embedding-s3-poller.ts',
-            timeout: cdk.Duration.minutes(15),
-            memorySize: 1024,
-            logRetention: logs.RetentionDays.ONE_WEEK,
-            role: new iam.Role(this, 'EmbS3PollerRole', {
-                path: '/rag/embedding/',                                                   // ← Hierarchical path
-                roleName: `s3-poller-${this.account}-${this.region}`,                    // ← Role name only
-                assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-                managedPolicies: [
-                    iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
-                ]
-            }),
-            environment: {
-                PROCESSED_CONTENT_BUCKET_NAME: processedContentBucketName,
-                EMBEDDINGS_BUCKET_NAME: embeddingsBucket.bucketName,
-                EMBEDDING_QUEUE_URL: embeddingProcessingQueue.queueUrl,
-                CHECKPOINT_TABLE_NAME: checkpointTable.tableName,
-                BATCH_SIZE: '50', // Process 50 files per execution
-                SERVICE_ID: 'embedding-processor-1',
-                AWS_ACCOUNT_ID: this.account,
-            },
-            // reservedConcurrentExecutions: 1, // Ensure sequential processing
-        });
 
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)
         const embeddingProcessorHandler = new NodejsFunction(this, 'EmbEmbeddingProcessorHandler', {
@@ -170,35 +129,35 @@ export class RagEmbeddingStack extends cdk.Stack {
             },
         });
 
-        // === EVENTBRIDGE SCHEDULED RULE FOR S3 POLLING ===
-        const s3PollingRule = new events.Rule(this, 'EmbS3PollingRule', {
-            ruleName: `rag-embedding-s3-polling-${this.account}-${this.region}`,
-            description: 'Triggers S3 poller Lambda every minute',
-            schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
-        });
+        const processedContentBucket = s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName);
 
-        s3PollingRule.addTarget(new targets.LambdaFunction(s3PollerHandler));
+        // Immediate notification when processed content is created
+        processedContentBucket.addEventNotification(
+            s3.EventType.OBJECT_CREATED,
+            new s3n.SqsDestination(embeddingProcessingQueue),
+            {
+                prefix: 'processed/',
+                suffix: '.json'
+            }
+        );
 
-        // === SQS EVENT SOURCES FOR LAMBDA FUNCTIONS ===
+        // === SQS EVENT SOURCES WITH DYNAMIC BATCHING ===
 
-        // Main embedding processing queue
+        // Main embedding processing with dynamic batching
         embeddingProcessorHandler.addEventSource(new lambdaEventSources.SqsEventSource(embeddingProcessingQueue, {
-            batchSize: 10, // Process up to 10 embedding tasks at once
+            batchSize: 1000,
             maxBatchingWindow: cdk.Duration.seconds(5),
+            maxConcurrency: 8,
+            reportBatchItemFailures: true,
         }));
 
         // DLQ processing
         dlqHandlerHandler.addEventSource(new lambdaEventSources.SqsEventSource(embeddingProcessingDlq, {
-            batchSize: 1, // Process DLQ messages one at a time
+            batchSize: 100,
+            maxBatchingWindow: cdk.Duration.seconds(20),
+            maxConcurrency: 8,
+            reportBatchItemFailures: true,
         }));
-
-        // === IAM PERMISSIONS ===
-
-        // S3 poller permissions
-        s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName)
-            .grantRead(s3PollerHandler);
-        embeddingProcessingQueue.grantSendMessages(s3PollerHandler);
-        checkpointTable.grantReadWriteData(s3PollerHandler);
 
         // Embedding processor permissions
         embeddingsBucket.grantReadWrite(embeddingProcessorHandler);
@@ -256,10 +215,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             description: 'SQS queue for embedding processing tasks',
         });
 
-        new cdk.CfnOutput(this, 'EmbCheckpointTableName', {
-            value: checkpointTable.tableName,
-            description: 'DynamoDB table for S3 polling checkpoints',
-        });
+        // ❌ REMOVED: Checkpoint table output (no longer needed for event-driven architecture)
 
         const ingestionEnver = myEnver.processedContentSubscription.producer.owner.ingestionEnver
 

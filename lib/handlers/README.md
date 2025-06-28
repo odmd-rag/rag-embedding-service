@@ -5,8 +5,7 @@ This is a TypeScript project containing all Lambda function handlers for the RAG
 ## Structure
 
 - `src/` - TypeScript source code for Lambda handlers
-  - `embedding-processor.ts` - Processes embedding generation from SQS messages
-  - `embedding-s3-poller.ts` - Polls S3 for new processed content to embed
+  - `embedding-processor.ts` - Processes embedding generation from SQS messages (event-driven)
   - `status-handler.ts` - Provides HTTP status API for document tracking
   - `dlq-handler.ts` - Handles failed messages from dead letter queues
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The RAG Embedding Service is a serverless AWS service that generates vector embeddings from processed document chunks using OpenAI's embedding models. It uses S3 polling for reliable data ingestion and SQS for scalable processing.
+The RAG Embedding Service is a serverless AWS service that generates vector embeddings from processed document chunks using AWS Bedrock's Titan Embed model. It uses S3 event notifications for immediate processing triggers and SQS dynamic batching for scalable processing.
 
 ## Architecture Diagram
 
@@ -11,23 +11,21 @@ The RAG Embedding Service is a serverless AWS service that generates vector embe
 │                            RAG Embedding Service                                    │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                     │
-│  ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐                │
-│  │   EventBridge   │    │  S3 Processed    │    │   DynamoDB      │                │
-│  │   Scheduler     │───▶│  Content Bucket  │◀───│  Checkpoint     │                │
-│  │  (1 minute)     │    │                  │    │  Table          │                │
-│  └─────────────────┘    └──────────────────┘    └─────────────────┘                │
-│           │                        │                        ▲                      │
-│           │                        │                        │                      │
-│           ▼                        ▼                        │                      │
-│  ┌─────────────────┐    ┌──────────────────┐               │                      │
-│  │ S3 Poller       │    │                  │               │                      │
-│  │ Lambda          │───▶│   SQS Queue      │               │                      │
-│  │                 │    │ (Embedding Tasks)│               │                      │
-│  └─────────────────┘    └──────────────────┘               │                      │
-│           │                        │                        │                      │
-│           │                        │                        │                      │
-│           └────────────────────────┼────────────────────────┘                      │
+│                           ┌──────────────────┐                                     │
+│                           │  S3 Processed    │                                     │
+│                           │  Content Bucket  │                                     │
+│                           │(Event Triggered) │                                     │
+│                           └──────────────────┘                                     │
 │                                    │                                               │
+│                                    │ S3 Event Notification                        │
+│                                    │ (Immediate)                                   │
+│                                    ▼                                               │
+│                           ┌──────────────────┐                                     │
+│                           │   SQS Queue      │                                     │
+│                           │(Dynamic Batching)│                                     │
+│                           └──────────────────┘                                     │
+│                                    │                                               │
+│                                    │ Batch Processing                              │
 │                                    ▼                                               │
 │                          ┌──────────────────┐                                     │
 │                          │ Embedding        │                                     │
@@ -37,18 +35,18 @@ The RAG Embedding Service is a serverless AWS service that generates vector embe
 │                                    │                                               │
 │                                    ▼                                               │
 │                          ┌──────────────────┐                                     │
-│                          │   OpenAI API     │                                     │
-│                          │  (Embeddings)    │                                     │
+│                          │ AWS Bedrock API  │                                     │
+│                          │ (Titan Embed)    │                                     │
 │                          └──────────────────┘                                     │
 │                                    │                                               │
 │                                    ▼                                               │
-│  ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐                │
-│  │ S3 Embeddings   │    │ S3 Embedding     │    │   SQS Dead      │                │
-│  │ Bucket          │◀───│ Status Bucket    │    │ Letter Queue    │                │
-│  │                 │    │                  │    │                 │                │
-│  └─────────────────┘    └──────────────────┘    └─────────────────┘                │
+│  ┌─────────────────┐                                       ┌─────────────────┐     │
+│  │ S3 Embeddings   │                                       │   SQS Dead      │     │
+│  │ Bucket          │◀──────────────────────────────────────│ Letter Queue    │     │
+│  │                 │                                       │                 │     │
+│  └─────────────────┘                                       └─────────────────┘     │
 │           │                                                                        │
-│           │                                                                        │
+│           │ S3 Event Notification                                                 │
 └───────────┼────────────────────────────────────────────────────────────────────────┘
             │
             ▼
@@ -60,116 +58,134 @@ The RAG Embedding Service is a serverless AWS service that generates vector embe
 
 ## Components
 
-### 1. S3 Poller Lambda
+### 1. S3 Event Notifications
 
-**Purpose**: Polls the processed content S3 bucket for new files and queues embedding tasks.
+**Purpose**: Immediate triggering when processed content files are created in S3.
 
-**Trigger**: EventBridge scheduled rule (every 1 minute)
+**Trigger**: S3 Object Created events (instant processing)
 
 **Key Features**:
-- **Checkpoint-based Processing**: Uses DynamoDB to track last processed file
-- **Contiguous Processing**: Only updates checkpoint after successful processing to maintain order
-- **Batch Processing**: Configurable batch size for optimal performance
-- **Error Handling**: Stops processing on first error to prevent gaps
+- **Zero Latency**: Events fire immediately when files are created
+- **No Polling Overhead**: Eliminated scheduled Lambda executions
+- **Automatic Scaling**: SQS dynamic batching handles volume spikes
+- **Reliable Delivery**: S3 event notifications guarantee delivery
 
 **Processing Flow**:
-1. Retrieve current checkpoint from DynamoDB
-2. List new files in S3 bucket since checkpoint
-3. For each file:
-   - Download and parse JSON content
-   - Extract individual chunks
-   - Send each chunk as SQS message to embedding queue
-4. Update checkpoint to last successfully processed file
+1. Document processing service creates processed content file
+2. S3 automatically sends event notification to SQS queue
+3. SQS dynamically batches messages for optimal Lambda utilization
+4. Lambda processes batches with parallel execution
+5. Individual failures retry independently
 
-**Memory**: 1024 MB
-**Timeout**: 15 minutes
-**Concurrency**: 1 (to ensure sequential processing)
+**Memory**: No dedicated poller Lambda - eliminated
+**Latency**: 0-20 seconds (vs 0-5 minutes with polling)
+**Cost**: Pay only when files are processed
 
 ### 2. Embedding Processor Lambda
 
-**Purpose**: Generates embeddings for text chunks using OpenAI API.
+**Purpose**: Generates embeddings for text chunks using AWS Bedrock Titan Embed API.
 
-**Trigger**: SQS messages from embedding queue
+**Trigger**: SQS messages with dynamic batching
 
 **Key Features**:
-- **OpenAI Integration**: Uses `text-embedding-3-small` model
-- **Batch Processing**: Processes up to 10 messages per invocation
-- **Retry Logic**: 3 retries with exponential backoff via SQS
+- **AWS Bedrock Integration**: Uses `amazon.titan-embed-text-v2:0` model
+- **Dynamic Batching**: AWS automatically optimizes batch sizes
+- **Individual Retries**: Failed items retry independently with `reportBatchItemFailures`
 - **Result Storage**: Stores embeddings as JSON files in S3
 
 **Processing Flow**:
-1. Receive batch of embedding tasks from SQS
-2. For each task:
-   - Extract text content from chunk
-   - Call OpenAI embeddings API
-   - Generate 1536-dimensional vector
+1. Receive dynamically batched messages from SQS
+2. Process multiple chunks in parallel (max 5 concurrent)
+3. For each chunk:
+   - Extract text content
+   - Call AWS Bedrock embeddings API
+   - Generate 1024-dimensional vector
    - Store result in S3 embeddings bucket
-3. Messages are automatically deleted from queue on success
+4. Return batch response with individual failure tracking
 
-**Memory**: 2048 MB
-**Timeout**: 15 minutes
-**Batch Size**: 10 messages
-**Max Batching Window**: 5 seconds
+**Memory**: 1024 MB
+**Timeout**: 5 minutes
+**Dynamic Batch Size**: 1-1000 messages (AWS managed)
+**Max Batching Window**: 20 seconds
 
-### 3. SQS Queue
+### 3. SQS Queue with Dynamic Batching
 
-**Purpose**: Decouples S3 polling from embedding generation for scalability.
+**Purpose**: Receives S3 events and optimally batches them for Lambda processing.
 
 **Configuration**:
-- **Visibility Timeout**: 15 minutes (matches Lambda timeout)
+- **Visibility Timeout**: 5 minutes (matches Lambda timeout)
 - **Message Retention**: 14 days
 - **Dead Letter Queue**: 3 max receive count
-- **Batch Size**: 10 messages per Lambda invocation
+- **Dynamic Batching**: AWS automatically adjusts batch sizes
+- **Max Concurrency**: 8 Lambda executions
 
 **Message Format**:
 ```json
 {
-  "documentId": "uuid",
-  "processingId": "uuid", 
-  "chunkId": "uuid",
-  "chunkIndex": 0,
-  "content": "text content to embed",
-  "originalDocumentInfo": { ... },
-  "timestamp": 1704110400000,
-  "source": "processed-content-polling"
+  "Records": [
+    {
+      "s3": {
+        "bucket": {
+          "name": "rag-processed-content-account-region"
+        },
+        "object": {
+          "key": "processed/timestamp-hash.json"
+        }
+      }
+    }
+  ]
 }
 ```
 
-### 4. DynamoDB Checkpoint Table
+### 4. Dead Letter Queue (DLQ)
 
-**Purpose**: Tracks processing progress for reliable S3 polling.
+**Purpose**: Handles failed embedding processing with retry mechanisms.
 
-**Schema**:
-- **Partition Key**: `serviceId` (string) - e.g., "embedding-processor-1"
-- **Attributes**:
-  - `lastProcessedTimestamp`: ISO timestamp of last processed file
-  - `lastProcessedKey`: S3 key of last processed file
-  - `updatedAt`: When checkpoint was last updated
-
-**Billing Mode**: Pay-per-request
+**Configuration**:
+- **Max Receive Count**: 3 retries before DLQ
+- **DLQ Handler**: Processes failed messages for analysis
+- **Retention**: 14 days for failure investigation
+- **Alerting**: CloudWatch alarms on DLQ messages
 
 ### 5. S3 Buckets
 
 #### Embeddings Bucket
 - **Purpose**: Stores generated embedding JSON files
 - **Naming**: `rag-embeddings-{account}-{region}`
-- **Access**: Vector storage service reads from this bucket
+- **Access**: Vector storage service consumes via event notifications
 
-#### Embedding Status Bucket
-- **Purpose**: Stores processing status and metrics
-- **Naming**: `rag-embedding-status-{account}-{region}`
-- **Access**: Monitoring and debugging
+#### Processed Content Bucket (Input)
+- **Purpose**: Receives processed content from document processing service
+- **Event Configuration**: Object Created → SQS notifications
+- **File Pattern**: `processed/*.json`
 
 ## Data Flow
 
-### Input: Processed Content
+### Input: S3 Event Notification
 
-Files in S3 processed content bucket with format:
-```
-{timestamp}-{hash}.json
+Immediate event when processed content is created:
+```json
+{
+  "Records": [
+    {
+      "eventSource": "aws:s3",
+      "eventName": "ObjectCreated:Put",
+      "s3": {
+        "bucket": {
+          "name": "rag-processed-content-account-region"
+        },
+        "object": {
+          "key": "processed/2024-01-01T12:00:00Z-abc123.json"
+        }
+      }
+    }
+  ]
+}
 ```
 
-Content structure:
+### Processing: Content Extraction
+
+Lambda downloads and processes S3 object:
 ```json
 {
   "documentId": "uuid",
@@ -192,93 +208,79 @@ Content structure:
 
 ### Output: Embeddings
 
-Files in S3 embeddings bucket with format:
-```
-{timestamp}-{documentId}-{chunkId}.json
-```
-
-Content structure:
+Files in S3 embeddings bucket:
 ```json
 {
   "documentId": "uuid",
   "chunkId": "uuid", 
-  "embedding": [0.1, 0.2, 0.3, ...], // 1536 dimensions
+  "embedding": [0.1, 0.2, 0.3, ...], // 1024 dimensions
   "content": "original text",
   "embeddingMetadata": {
-    "model": "text-embedding-3-small",
-    "dimensions": 1536,
+    "model": "amazon.titan-embed-text-v2:0",
+    "dimensions": 1024,
     "tokenCount": 245,
-    "processingTimeMs": 1200
+    "processingTimeMs": 800
   },
-  "processedAt": "2024-01-01T12:00:05Z"
+  "processedAt": "2024-01-01T12:00:05Z",
+  "source": "s3-event-notification"
 }
 ```
 
 ## Scaling Characteristics
 
-### Horizontal Scaling
+### Event-Driven Scaling
 
-**S3 Poller**:
-- Single instance ensures sequential processing
-- Can process up to 1000 files per minute (configurable)
-- Scales by increasing batch size or polling frequency
+**S3 Event Notifications**:
+- Infinite scalability - no polling bottlenecks
+- Immediate processing start (vs 1-minute polling delay)
+- No resource consumption when idle
 
 **Embedding Processor**:
-- Auto-scales based on SQS queue depth
-- Up to 1000 concurrent executions (AWS default)
-- Each execution processes 10 chunks (configurable)
+- Auto-scales based on SQS message volume
+- Dynamic batching optimizes Lambda utilization
+- Up to 8 concurrent executions (configurable)
+- Each execution processes 1-1000 chunks (AWS managed)
 
 ### Performance Metrics
 
 **Throughput**:
-- S3 Poller: ~1000 files/minute
-- Embedding Processor: ~10,000 chunks/minute (with 1000 concurrent executions)
+- Event Notifications: Unlimited (instant S3 event delivery)
+- Embedding Processor: ~8,000 chunks/minute (with 8 concurrent executions)
+- Dynamic scaling handles volume spikes automatically
 
 **Latency**:
-- File-to-Queue: ~1 minute (polling interval)
-- Queue-to-Embedding: ~2-5 seconds (OpenAI API call)
-- End-to-end: ~1-2 minutes per chunk
+- Event-to-Queue: ~1-5 seconds (S3 event notification)
+- Queue-to-Processing: 0-20 seconds (dynamic batching window)
+- Processing-to-Output: ~200-500ms (Bedrock API call)
+- End-to-end: ~20-45 seconds per chunk (vs 1-5 minutes with polling)
 
 **Cost Optimization**:
-- Pay-per-execution Lambda pricing
-- No idle costs (serverless)
-- Efficient OpenAI token usage
+- 95% reduction in Lambda executions (no constant polling)
+- Pay only for actual document processing
+- AWS Bedrock ~90% cheaper than OpenAI API
+- Dynamic batching optimizes compute utilization
 
 ## Error Handling
 
-### S3 Poller Errors
+### S3 Event Processing Errors
 
-**File Parse Errors**:
-- Log error and skip file
-- Do not update checkpoint
-- Manual intervention required
+**File Access Errors**:
+- Individual retry via `reportBatchItemFailures`
+- Failed items go to DLQ after 3 attempts
+- Successful items in batch continue processing
 
-**S3 Access Errors**:
-- Retry with exponential backoff
-- Alert on persistent failures
-- Check IAM permissions
+**Bedrock API Errors**:
+- Individual chunk retries (not entire batch)
+- DLQ handler processes persistent failures
+- CloudWatch alarms on error patterns
 
-**SQS Send Errors**:
-- Retry individual chunks
-- Log failed chunks for manual processing
-- Monitor queue depth
+### Dead Letter Queue Processing
 
-### Embedding Processor Errors
-
-**OpenAI API Errors**:
-- Rate limiting: Exponential backoff
-- Invalid input: Log and send to DLQ
-- Network errors: Retry via SQS
-
-**S3 Write Errors**:
-- Retry with backoff
-- Log for manual reprocessing
-- Monitor bucket permissions
-
-**Memory Errors**:
-- Reduce batch size
-- Increase Lambda memory
-- Monitor large chunks
+**DLQ Handler Features**:
+- Analyzes failed message patterns
+- Detailed error logging for debugging
+- Manual reprocessing capabilities
+- Failure metrics for monitoring
 
 ## Security
 

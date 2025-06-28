@@ -2,26 +2,18 @@
 
 **Production-ready serverless service** for cost-effective text embedding generation using **AWS Bedrock's Titan Embed models**.
 
-## Architecture Overview
+## 🚀 Key Services
 
-The RAG Embedding Service is a **serverless AWS service** that generates vector embeddings from processed document chunks using **AWS Bedrock Titan Embed models**. It leverages hierarchical IAM role naming for secure cross-service access and uses S3 polling for reliable data ingestion. The embeddings are stored in S3 and consumed by the **Vector Storage Service**, which manages the vector database operations.
+1. **Embedding Processor Lambda** (`EmbProcessorHandler`): Processes embedding generation from SQS messages
+2. **Status Handler Lambda** (`EmbStatusHandler`): Provides HTTP API for status tracking
+3. **DLQ Handler Lambda** (`EmbDlqHandler`): Handles failed processing messages
 
-### Key Components
+## 🛠️ Technology Stack
 
-1. **S3 Poller Lambda** (`EmbS3PollerHandler`): Monitors document processing bucket for new content
-2. **SQS Queue** (`EmbProcessingQueue`): Decouples polling from processing for reliable message handling  
-3. **Embedding Processor Lambda** (`EmbProcessorHandler`): Generates embeddings via **AWS Bedrock API**, stores results in S3
-4. **DLQ Handler** (`EmbDlqHandler`): Processes failed embedding attempts with error analysis
-5. **Status Tracking**: Separate S3 bucket for processing status and monitoring
-
-### Technology Stack
-
-- **AWS Bedrock**: AI service for **Titan Embed text-v2** model access
-- **AWS Lambda**: Serverless compute for stateless embedding generation
+- **AWS Lambda**: Serverless compute for stateless embedding generation  
 - **Amazon S3**: Storage for embeddings and processing status
-- **Amazon SQS**: Message queuing for reliable processing
-- **Amazon DynamoDB**: Checkpoint tracking for S3 polling
-- **Amazon EventBridge**: Scheduled S3 polling every minute
+- **Amazon SQS**: Message queuing for reliable processing with dynamic batching
+- **AWS S3 Event Notifications**: Immediate triggering on new processed content
 
 ## Embedding Model Details
 
@@ -42,12 +34,12 @@ The RAG Embedding Service is a **serverless AWS service** that generates vector 
 
 ## 🏗️ Architecture Overview
 
-### **Data Flow**
+### **Data Flow (Event-Driven)**
 
 ```
-Document Processing Service → Processed Content S3 Bucket → EventBridge Scheduler → S3 Poller Lambda → SQS Queue → Embedding Processor Lambda → Embeddings S3 Bucket → Vector Storage Service
-                                                ↓                                           ↓                                              ↓
-                                         DynamoDB Checkpoint Table                   Dead Letter Queue                    Status API (WebUI Integration)
+Document Processing Service → Processed Content S3 Bucket → S3 Event Notification → SQS Queue → Embedding Processor Lambda → Embeddings S3 Bucket → Vector Storage Service
+                                                                                          ↓                                              ↓
+                                                                                   Dead Letter Queue                    Status API (WebUI Integration)
 ```
 
 ### **NOT** Connected to Home Vector Server
@@ -85,7 +77,7 @@ new OdmdShareOut(this, new Map([
 ### **Embedding Generation**
 - **AWS Bedrock Integration**: Uses `amazon.titan-embed-text-v2:0` model for high-quality embeddings
 - **Batch Processing**: Processes multiple chunks in parallel with configurable batch sizes
-- **Checkpoint Recovery**: Resumes processing from last checkpoint after failures
+- **Event-Driven Processing**: Immediate processing via S3 event notifications with zero polling delay
 - **Cost Optimization**: Efficient token usage and no external API costs
 
 ### **Serverless Benefits**
@@ -97,8 +89,9 @@ new OdmdShareOut(this, new Map([
 ### **Reliability Features**
 - **3-Retry Logic**: SQS-based retry with exponential backoff
 - **Dead Letter Queue**: Persistent storage for failed embedding tasks
-- **Progress Tracking**: DynamoDB checkpoint system for reliable processing
+- **Batch Processing**: Parallel processing with configurable concurrency limits
 - **Error Handling**: Comprehensive error categorization and recovery
+- **Individual Retries**: Failed items retry independently using `reportBatchItemFailures`
 
 ## 🛠️ Development
 
@@ -142,12 +135,12 @@ npx cdk diff
 
 ## 📊 Processing Flow
 
-### **1. S3 Polling**
-The S3 Poller Lambda runs every minute to check for new processed content files:
+### **1. S3 Event Notifications**
+When new processed content files are created, S3 immediately sends notifications to SQS:
 
 ```typescript
-// Polls for files matching pattern: YYYY-MM-DDTHH:mm:ss.sssZ-{hash}.json
-const newObjects = await listNewProcessedContent(checkpoint);
+// S3 triggers immediate notifications for files matching pattern: processed/*.json
+// No polling delay - immediate processing when files are created
 ```
 
 ### **2. Content Processing**
@@ -237,21 +230,12 @@ Embeddings are stored in S3 as JSON files:
 
 ### **Environment Variables**
 
-#### **S3 Poller Lambda**
-```bash
-PROCESSED_CONTENT_BUCKET_NAME=rag-processed-content-account-region
-EMBEDDINGS_BUCKET_NAME=rag-embeddings-account-region
-EMBEDDING_QUEUE_URL=https://sqs.region.amazonaws.com/account/rag-embedding-processing-queue-account-region
-CHECKPOINT_TABLE_NAME=rag-embedding-checkpoint-account-region
-BATCH_SIZE=50
-SERVICE_ID=embedding-processor-1
-AWS_ACCOUNT_ID=123456789012
-```
+#### **Event-Driven Architecture**
+*No environment variables needed for S3 polling - events trigger automatically*
 
 #### **Embedding Processor Lambda**
 ```bash
 EMBEDDINGS_BUCKET_NAME=rag-embeddings-account-region
-EMBEDDING_STATUS_BUCKET_NAME=rag-embedding-status-account-region
 AWS_ACCOUNT_ID=123456789012
 ```
 
@@ -262,56 +246,46 @@ const maxTokens = 8192; // Model limit
 const apiTimeout = 30000; // 30 seconds
 ```
 
-### **Polling Configuration**
+### **Dynamic Batching Configuration**
 ```typescript
-const pollingInterval = 1; // minute
-const batchSize = 50; // files per batch
-const checkpointStrategy = 'contiguous'; // Only update on successful processing
+// SQS event source with dynamic batching
+batchSize: 1,                               // Minimum (AWS scales up automatically)
+maxBatchingWindow: cdk.Duration.seconds(20), // Max delay for processing
+maxConcurrency: 8,                          // Parallel lambda control
+reportBatchItemFailures: true,              // Individual failure handling
 ```
 
 ## 📈 Monitoring & Observability
 
 ### **CloudWatch Metrics**
-- **ProcessedContentFiles**: Number of files processed per invocation
-- **EmbeddingTasksQueued**: Number of chunks sent to embedding queue
+- **EmbeddingTasksProcessed**: Number of chunks processed per invocation
 - **EmbeddingGenerationTime**: Time to generate embeddings
 - **BedrockAPIErrors**: Failed API calls to Bedrock
-- **CheckpointLag**: Time between file creation and processing
+- **BatchProcessingTime**: Time to process SQS message batches
 
 ### **CloudWatch Logs**
 Structured logging with request IDs for tracing:
 
 ```
-[REQUEST_ID] === Processed Content S3 Poller Started ===
-[REQUEST_ID] Found 15 new processed content files
-[REQUEST_ID] 📄 Processing object 1/15: 2024-01-01T12:00:02.123Z-abc123.json
-[REQUEST_ID] ✅ Successfully processed 15/15 files in 2500ms
-```
-
-### **DynamoDB Checkpoint Table**
-```json
-{
-  "serviceId": "embedding-processor-1",
-  "lastProcessedTimestamp": "2024-01-01T12:00:02.123Z",
-  "lastProcessedKey": "2024-01-01T12:00:02.123Z-abc123.json",
-  "updatedAt": "2024-01-01T12:00:05.456Z"
-}
+[REQUEST_ID] === Embedding Processor Lambda Started ===
+[REQUEST_ID] Records to process: 5
+[REQUEST_ID] 📄 Processing SQS record 1/5: messageId-abc123
+[REQUEST_ID] ✅ Successfully processed 5/5 records in 2500ms
 ```
 
 ## 🔒 Security
 
 ### **IAM Permissions**
 
-#### **S3 Poller Lambda** (`EmbS3PollerRole`)
-- `s3:ListBucket` on processed content bucket
-- `s3:GetObject` on processed content bucket
-- `dynamodb:GetItem`, `dynamodb:PutItem` on checkpoint table
-- `sqs:SendMessage` on embedding queue
-
 #### **Embedding Processor Lambda** (`EmbProcessorRole`)
+- `s3:GetObject` on processed content bucket (source files)
 - `s3:PutObject` on embeddings bucket
-- `s3:PutObject` on embedding status bucket
 - `bedrock:InvokeModel` on Titan Embed model
+- `sqs:ReceiveMessage`, `sqs:DeleteMessage` on embedding queue
+
+#### **Status Handler Lambda** (`EmbStatusRole`)
+- `s3:GetObject` on processed content bucket
+- `s3:GetObject` on embeddings bucket
 
 ### **Cross-Service Access**
 ```typescript
@@ -322,14 +296,6 @@ embeddingsBucket.addToResourcePolicy(new iam.PolicyStatement({
     principals: [new iam.AccountPrincipal(this.account)],
     actions: ['s3:GetObject', 's3:ListBucket'],
     resources: [embeddingsBucket.bucketArn, `${embeddingsBucket.bucketArn}/*`],
-    conditions: {
-        'StringLike': {
-            'aws:PrincipalArn': [
-                `arn:aws:iam::${this.account}:role/RagVectorStorageStack-EmbeddingPoller*`,
-                `arn:aws:iam::${this.account}:role/RagVectorStorageStack-VectorProcessor*`
-            ]
-        }
-    }
 }));
 ```
 
@@ -349,14 +315,20 @@ npm test -- --coverage
 
 ### **Integration Tests**
 ```bash
-# Test S3 polling functionality
-npm run test:integration:poller
+# Test event-driven processing
+npm run test:integration:event-driven
 
 # Test embedding generation
 npm run test:integration:embeddings
 
 # Test end-to-end flow
 npm run test:e2e
+```
+
+### **Test event-driven functionality**
+```bash
+# Test event-driven functionality
+npm run test:integration:event-driven
 ```
 
 ## 🚨 Troubleshooting
@@ -368,12 +340,11 @@ npm run test:e2e
 # Check if processed content bucket has files
 aws s3 ls s3://rag-processed-content-{account}-{region}/
 
-# Check checkpoint table
-aws dynamodb get-item --table-name rag-embedding-checkpoint-{account}-{region} \
-  --key '{"serviceId": {"S": "embedding-processor-1"}}'
+# Check SQS queue for pending messages
+aws sqs get-queue-attributes --queue-url https://sqs.{region}.amazonaws.com/{account}/rag-embedding-processing-queue-{account}-{region}
 
-# Check S3 poller logs
-aws logs tail /aws/lambda/rag-embedding-s3-poller-{account}-{region}
+# Check embedding processor logs
+aws logs tail /aws/lambda/rag-embedding-processor-{account}-{region}
 ```
 
 #### **Bedrock API Errors**
@@ -428,12 +399,11 @@ npx cdk deploy --profile prod --require-approval never
 
 All CDK constructs use the "Emb" prefix for consistency:
 
-- **Tables**: `EmbCheckpointTable`
 - **Queues**: `EmbProcessingQueue`, `EmbProcessingDlq`
-- **Buckets**: `EmbBucket`, `EmbStatusBucket`
-- **Lambda Functions**: `EmbS3PollerHandler`, `EmbProcessorHandler`, `EmbDlqHandler`
-- **IAM Roles**: `EmbS3PollerRole`, `EmbProcessorRole`, `EmbDlqRole`
-- **API Gateway**: `EmbApi`, `EmbStatusHandler`
+- **Buckets**: `EmbBucket`
+- **Lambda Functions**: `EmbProcessorHandler`, `EmbDlqHandler`, `EmbStatusHandler`
+- **IAM Roles**: `EmbProcessorRole`, `EmbDlqRole`, `EmbStatusRole`
+- **API Gateway**: `EmbApi`
 - **CloudWatch Alarms**: `EmbDlqAlarm`, `EmbProcessorErrorAlarm`
 
 This naming convention ensures clear identification of resources and maintains consistency across the service.
@@ -447,4 +417,4 @@ This naming convention ensures clear identification of resources and maintains c
 
 ## License
 
-This project is licensed under the MIT License. 
+This project is licensed under the MIT License.

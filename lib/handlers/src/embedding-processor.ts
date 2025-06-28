@@ -1,7 +1,6 @@
-import { SQSEvent, SQSRecord, Context } from 'aws-lambda';
+import { SQSEvent, SQSRecord, Context, SQSBatchResponse, SQSBatchItemFailure } from 'aws-lambda';
 import { S3Client, PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import { createHash } from 'crypto';
 
 // Initialize AWS clients
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
@@ -58,7 +57,7 @@ interface BedrockEmbeddingResponse {
 /**
  * Lambda handler for processing embedding tasks from SQS
  */
-export const handler = async (event: SQSEvent, context: Context): Promise<void> => {
+export const handler = async (event: SQSEvent, context: Context): Promise<SQSBatchResponse> => {
     const startTime = Date.now();
     const requestId = context.awsRequestId;
     
@@ -68,36 +67,48 @@ export const handler = async (event: SQSEvent, context: Context): Promise<void> 
     console.log(`[${requestId}] Remaining time: ${context.getRemainingTimeInMillis()}ms`);
     console.log(`[${requestId}] Records to process: ${event.Records.length}`);
 
-    let processedCount = 0;
-    let failedCount = 0;
-
-    // Process each SQS record
-    for (const record of event.Records) {
+    const batchItemFailures: SQSBatchItemFailure[] = [];
+    
+    // Process records in batches with concurrency control
+    const processPromises = event.Records.map(async (record) => {
         const recordStartTime = Date.now();
         try {
             console.log(`[${requestId}] Processing SQS record: ${record.messageId}`);
             const chunkId = await processEmbeddingTask(record, requestId);
-            processedCount++;
             
             const recordDuration = Date.now() - recordStartTime;
             console.log(`[${requestId}] ✅ Successfully processed record ${record.messageId} (chunk: ${chunkId}) in ${recordDuration}ms`);
+            return { success: true, messageId: record.messageId, chunkId };
             
         } catch (error) {
-            failedCount++;
             const recordDuration = Date.now() - recordStartTime;
             console.error(`[${requestId}] ❌ Failed to process record ${record.messageId} after ${recordDuration}ms:`, error);
             
-            // Let SQS handle retries by throwing
-            throw error;
+            // Add to batch failures for individual retry
+            batchItemFailures.push({
+                itemIdentifier: record.messageId
+            });
+            
+            return { success: false, messageId: record.messageId, error };
         }
-    }
+    });
+
+    const results = await Promise.allSettled(processPromises);
+
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+    const failed = results.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.success)).length;
 
     const totalDuration = Date.now() - startTime;
     console.log(`[${requestId}] === Embedding Processor Lambda Completed ===`);
     console.log(`[${requestId}] Total execution time: ${totalDuration}ms`);
-    console.log(`[${requestId}] Processed: ${processedCount}/${event.Records.length}`);
-    console.log(`[${requestId}] Failed: ${failedCount}/${event.Records.length}`);
+    console.log(`[${requestId}] Processed: ${successful}/${event.Records.length}`);
+    console.log(`[${requestId}] Failed: ${failed}/${event.Records.length}`);
+    console.log(`[${requestId}] Batch failures: ${batchItemFailures.length}`);
     console.log(`[${requestId}] Final remaining time: ${context.getRemainingTimeInMillis()}ms`);
+
+    return {
+        batchItemFailures
+    };
 };
 
 /**

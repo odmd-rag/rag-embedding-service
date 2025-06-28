@@ -42,15 +42,12 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // Dead Letter Queue for failed embedding attempts
         const embeddingProcessingDlq = new sqs.Queue(this, 'EmbProcessingDlq', {
-            queueName: `rag-embedding-processing-dlq-${this.account}-${this.region}`,
             retentionPeriod: cdk.Duration.days(14),
             removalPolicy: cdk.RemovalPolicy.RETAIN,          // Prevent auto-deletion
         });
 
         // Main embedding processing queue
         const embeddingProcessingQueue = new sqs.Queue(this, 'EmbProcessingQueue', {
-            queueName: `rag-embedding-processing-queue-${this.account}-${this.region}`,
-
             // Optimized for dynamic batching
             visibilityTimeout: cdk.Duration.minutes(15),      // Lambda timeout * 3
             receiveMessageWaitTime: cdk.Duration.seconds(20), // Long polling
@@ -67,7 +64,6 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // S3 bucket for embeddings (consumed by vector storage service)
         const embeddingsBucket = new s3.Bucket(this, 'EmbEmbeddingsBucket', {
-            bucketName: `rag-embeddings-${this.account}-${this.region}`,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             autoDeleteObjects: true,
             versioned: true,
@@ -79,7 +75,6 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)
         const embeddingProcessorHandler = new NodejsFunction(this, 'EmbEmbeddingProcessorHandler', {
-            functionName: `rag-embedding-processor-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_18_X,
             handler: 'handler',
             entry: 'lib/handlers/src/embedding-processor.ts',
@@ -94,7 +89,6 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // DLQ handler Lambda (processes failed messages)
         const dlqHandlerHandler = new NodejsFunction(this, 'EmbDlqHandler', {
-            functionName: `rag-embedding-dlq-handler-${this.account}-${this.region}`,
             runtime: lambda.Runtime.NODEJS_22_X,
             handler: 'handler',
             entry: 'lib/handlers/src/dlq-handler.ts',
@@ -103,7 +97,6 @@ export class RagEmbeddingStack extends cdk.Stack {
             logRetention: logs.RetentionDays.ONE_WEEK,
             role: new iam.Role(this, 'EmbDlqRole', {
                 path: '/rag/embedding/',                                                 // ← Hierarchical path
-                roleName: `dlq-handler-${this.account}-${this.region}`,                 // ← Role name only
                 assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
                 managedPolicies: [
                     iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')

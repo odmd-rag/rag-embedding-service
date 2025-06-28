@@ -92,19 +92,15 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
     const startTime = Date.now();
     
     try {
-        // Check if embeddings have been generated (look for embedding objects in bucket)
-        // Use pattern: embeddings/{documentId}/*.json to find any chunks
         const embeddingStatus = await findDocumentEmbeddingStatus(documentId, requestId);
         
         if (embeddingStatus) {
             return embeddingStatus;
         }
         
-        // Check if processed content exists (prerequisite for embedding)
         const processedContentExists = await checkProcessedContentExists(documentId, requestId);
         
         if (processedContentExists) {
-            // Document has been processed but embeddings not started yet
             console.log(`[${requestId}] Document ${documentId} processed but embeddings not started`);
             
             return {
@@ -118,7 +114,6 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
                 }
             };
         } else {
-            // Document hasn't been processed yet
             console.log(`[${requestId}] Document ${documentId} not yet processed`);
             
             return {
@@ -149,15 +144,12 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
 
 async function findDocumentEmbeddingStatus(documentId: string, requestId: string): Promise<DocumentStatus | null> {
     try {
-        // Try to find any embedding object for this document
-        // Check a specific chunk pattern first (most common case)
         const embeddingKeys = [
             `embeddings/${documentId}/chunk-0.json`,
             `embeddings/${documentId}/chunk-1.json`,
             `embeddings/${documentId}/chunk-2.json`
         ];
         
-        // Check first few chunks to determine status
         for (const embeddingKey of embeddingKeys) {
             try {
                 const response = await s3Client.send(new HeadObjectCommand({
@@ -165,7 +157,6 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
                     Key: embeddingKey
                 }));
                 
-                // Found an embedding object - check its status
                 const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
                 const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
                 const chunkId = response.Metadata?.['chunk-id'] || 'unknown';
@@ -177,10 +168,9 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
                 console.log(`[${requestId}]   Chunk ID: ${chunkId}`);
                 
                 if (processingStatus === 'completed' && !isPlaceholder) {
-                    // At least one chunk is completed - embedding generation is working
                     return {
                         documentId,
-                        status: 'completed', // We found at least one completed chunk
+                        status: 'completed',
                         stage: 'embedding',
                         timestamp: response.Metadata?.['processed-at'] || new Date().toISOString(),
                         metadata: {
@@ -193,7 +183,6 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
                         }
                     };
                 } else if (processingStatus === 'failed') {
-                    // This chunk failed
                     return {
                         documentId,
                         status: 'failed',
@@ -208,7 +197,6 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
                         }
                     };
                 } else if (processingStatus === 'processing' && isPlaceholder) {
-                    // This chunk is currently being processed
                     return {
                         documentId,
                         status: 'processing',
@@ -225,15 +213,14 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
                 
             } catch (error: any) {
                 if (error.name === 'NotFound') {
-                    // This chunk doesn't exist yet, try next one
                     continue;
                 } else {
-                    throw error; // Re-throw other errors
+                    throw error;
                 }
             }
         }
         
-        return null; // No embedding objects found
+        return null;
         
     } catch (error) {
         console.error(`[${requestId}] Error finding embedding status for ${documentId}:`, error);
@@ -243,7 +230,6 @@ async function findDocumentEmbeddingStatus(documentId: string, requestId: string
 
 async function checkProcessedContentExists(documentId: string, requestId: string): Promise<boolean> {
     try {
-        // Check for processed content file
         const processedContentKey = `processed/${documentId}.json`;
         
         const response = await s3Client.send(new HeadObjectCommand({
@@ -251,7 +237,6 @@ async function checkProcessedContentExists(documentId: string, requestId: string
             Key: processedContentKey
         }));
         
-        // Check if it's completed (not just a placeholder)
         const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
         const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
         

@@ -1,10 +1,8 @@
 import { SQSEvent, SQSRecord, Context } from 'aws-lambda';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
-// Initialize AWS clients
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
-// Environment variables
 const EMBEDDING_STATUS_BUCKET = process.env.EMBEDDING_STATUS_BUCKET || '';
 
 interface FailedEmbeddingTask {
@@ -41,7 +39,6 @@ export const handler = async (
 
     let processedCount = 0;
 
-    // Process each DLQ record
     for (const record of event.Records) {
         const recordStartTime = Date.now();
         try {
@@ -56,8 +53,6 @@ export const handler = async (
             const recordDuration = Date.now() - recordStartTime;
             console.error(`[${requestId}] ❌ Failed to process DLQ record ${record.messageId} after ${recordDuration}ms:`, error);
             
-            // For DLQ processing, we don't want to throw errors that would cause reprocessing
-            // Instead, log the failure and continue
         }
     }
 
@@ -85,7 +80,6 @@ async function processFailedMessage(record: SQSRecord, requestId: string): Promi
         console.log(`[${requestId}]   Content Length: ${originalTask.content?.length || 0} chars`);
         console.log(`[${requestId}]   Receive Count: ${record.attributes.ApproximateReceiveCount}`);
 
-        // Create failure record
         const failedTask: FailedEmbeddingTask = {
             ...originalTask,
             errorInfo: {
@@ -100,15 +94,9 @@ async function processFailedMessage(record: SQSRecord, requestId: string): Promi
             }
         };
 
-        // Store failure record in S3 for analysis
         console.log(`[${requestId}] Storing failure record in S3...`);
         await storeFailureRecord(failedTask, requestId);
 
-        // TODO: Could also:
-        // - Send to SNS for alerting
-        // - Store in DynamoDB for failure tracking
-        // - Trigger manual review workflow
-        // - Attempt alternative processing logic
 
         console.log(`[${requestId}] DLQ processing completed for ${originalTask.chunkId}`);
         

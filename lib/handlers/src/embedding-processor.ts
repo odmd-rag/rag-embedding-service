@@ -2,14 +2,11 @@ import { SQSEvent, SQSRecord, Context, SQSBatchResponse, SQSBatchItemFailure } f
 import { S3Client, PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
-// Initialize AWS clients
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
-// Environment variables - only need embeddings bucket now
 const EMBEDDINGS_BUCKET_NAME = process.env.EMBEDDINGS_BUCKET!;
 
-// Interfaces
 interface EmbeddingTaskMessage {
     documentId: string;
     processingId: string;
@@ -69,7 +66,6 @@ export const handler = async (event: SQSEvent, context: Context): Promise<SQSBat
 
     const batchItemFailures: SQSBatchItemFailure[] = [];
     
-    // Process records in batches with concurrency control
     const processPromises = event.Records.map(async (record) => {
         const recordStartTime = Date.now();
         try {
@@ -84,7 +80,6 @@ export const handler = async (event: SQSEvent, context: Context): Promise<SQSBat
             const recordDuration = Date.now() - recordStartTime;
             console.error(`[${requestId}] ❌ Failed to process record ${record.messageId} after ${recordDuration}ms:`, error);
             
-            // Add to batch failures for individual retry
             batchItemFailures.push({
                 itemIdentifier: record.messageId
             });
@@ -132,13 +127,11 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         console.log(`[${requestId}]   Original document: ${embeddingTask.originalDocumentInfo.bucketName}/${embeddingTask.originalDocumentInfo.objectKey}`);
         console.log(`[${requestId}]   Source: ${embeddingTask.source}`);
 
-        // 🎯 Step 1.5: Create embedding placeholder immediately
         const embeddingKey = `embeddings/${embeddingTask.documentId}/${embeddingTask.chunkId}.json`;
         await createEmbeddingPlaceholder(embeddingKey, embeddingTask, requestId);
 
         console.log(`[${requestId}] 🔍 Step 2: Generating embedding via AWS Bedrock...`);
         
-        // Generate embedding using AWS Bedrock
         const embeddingStartTime = Date.now();
         const embedding = await generateEmbedding(embeddingTask.content, requestId);
         const embeddingDuration = Date.now() - embeddingStartTime;
@@ -150,7 +143,6 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
 
         console.log(`[${requestId}] 🔍 Step 3: Creating embedding result object...`);
 
-        // Create embedding result
         const embeddingResult: EmbeddingResult = {
             documentId: embeddingTask.documentId,
             processingId: embeddingTask.processingId,
@@ -172,7 +164,6 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         console.log(`[${requestId}] ✅ Step 3 PASSED: Embedding result created`);
         console.log(`[${requestId}] 🔍 Step 4: Storing embedding result with completion status...`);
 
-        // Store final embedding result with completion status
         await storeEmbeddingResultWithStatus(
             embeddingKey,
             embeddingResult,
@@ -192,7 +183,6 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         console.error(`[${requestId}] ❌ Failed to process embedding task after ${totalDuration}ms:`, error);
         
-        // Update placeholder with failure status
         const embeddingTask = JSON.parse(record.body);
         const embeddingKey = `embeddings/${embeddingTask.documentId}/${embeddingTask.chunkId}.json`;
         await updatePlaceholderWithFailure(
@@ -259,7 +249,6 @@ async function storeEmbeddingResultWithStatus(
 ): Promise<void> {
     console.log(`[${requestId}] 💾 Storing final embedding result with completion status: ${objectKey}`);
 
-    // Replace placeholder with final embedding result - atomic update
     await s3Client.send(new PutObjectCommand({
         Bucket: EMBEDDINGS_BUCKET_NAME,
         Key: objectKey,
@@ -294,7 +283,6 @@ async function updatePlaceholderWithFailure(
     console.log(`[${requestId}] ❌ Updating placeholder with failure status: ${objectKey}`);
     
     try {
-        // Update placeholder metadata to failed status, keep placeholder content
         await s3Client.send(new CopyObjectCommand({
             Bucket: EMBEDDINGS_BUCKET_NAME,
             Key: objectKey,
@@ -306,7 +294,7 @@ async function updatePlaceholderWithFailure(
                 'placeholder': 'true',
                 'failed-at': new Date().toISOString(),
                 'processing-time-ms': totalProcessingTimeMs.toString(),
-                'error-message': errorMessage.substring(0, 1000), // Truncate for S3 metadata limit
+                'error-message': errorMessage.substring(0, 1000),
                 'embedding-source': 'embedding-processor'
             },
             MetadataDirective: 'REPLACE'
@@ -316,7 +304,6 @@ async function updatePlaceholderWithFailure(
         
     } catch (error) {
         console.error(`[${requestId}] Failed to update placeholder with failure status:`, error);
-        // Don't throw - we still want to propagate the original error
     }
 }
 
@@ -335,7 +322,6 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
         
         const apiStartTime = Date.now();
         
-        // Prepare the request payload for Titan Embed
         const requestPayload = {
             inputText: text
         };
@@ -359,7 +345,6 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
         console.log(`[${requestId}] 📖 Parsing Bedrock response...`);
         const parseStartTime = Date.now();
         
-        // Parse the response body (it's a Uint8Array)
         const responseText = new TextDecoder().decode(response.body);
         const embeddingResponse = JSON.parse(responseText) as BedrockEmbeddingResponse;
         

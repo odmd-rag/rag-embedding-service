@@ -7,14 +7,11 @@ import { RagContracts } from '@odmd-rag/contracts-lib-rag';
 async function main() {
     const app = new cdk.App();
 
-    // Initialize RAG contracts
     const ragContracts = new RagContracts(app);
 
-    // Get the embedding service Envers from contracts
     const embeddingDev = ragContracts.ragEmbeddingBuild.dev;
     const embeddingProd = ragContracts.ragEmbeddingBuild.prod;
 
-    // Determine which environment to deploy based on CDK context or environment variables
     const targetEnv = app.node.tryGetContext('env') || process.env.TARGET_ENV || 'dev';
 
     let targetEnver;
@@ -28,7 +25,6 @@ async function main() {
     console.log(`Target Account: ${targetEnver.targetAWSAccountID}`);
     console.log(`Target Region: ${targetEnver.targetAWSRegion}`);
 
-    // Create the stack using the OndemandEnv contract pattern
     new RagEmbeddingStack(app, targetEnver, {
         env: {
             account: targetEnver.targetAWSAccountID,
@@ -43,7 +39,6 @@ async function main() {
     });
 }
 
-// Execute async main function
 main().catch((error) => {
     console.error('Error in main function:', error);
     process.exit(1);

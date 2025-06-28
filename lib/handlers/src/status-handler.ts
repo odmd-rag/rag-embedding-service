@@ -4,7 +4,6 @@ import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
 const EMBEDDINGS_BUCKET = process.env.EMBEDDINGS_BUCKET!;
-const EMBEDDING_STATUS_BUCKET = process.env.EMBEDDING_STATUS_BUCKET!;
 const PROCESSED_CONTENT_BUCKET = process.env.PROCESSED_CONTENT_BUCKET!;
 
 interface DocumentStatus {
@@ -18,6 +17,9 @@ interface DocumentStatus {
         embeddingCount?: number;
         vectorDimensions?: number;
         embeddingModel?: string;
+        isPlaceholder?: boolean;
+        chunkId?: string;
+        chunkIndex?: number;
     };
 }
 
@@ -90,55 +92,20 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
     const startTime = Date.now();
     
     try {
-        // Check if embeddings have been generated (exists in embeddings bucket)
-        const embeddingsKey = `embeddings/${documentId}.json`;
-        const embeddingsExist = await checkS3ObjectExists(EMBEDDINGS_BUCKET, embeddingsKey, requestId);
+        // Check if embeddings have been generated (look for embedding objects in bucket)
+        // Use pattern: embeddings/{documentId}/*.json to find any chunks
+        const embeddingStatus = await findDocumentEmbeddingStatus(documentId, requestId);
         
-        if (embeddingsExist) {
-            // Embeddings are complete - get metadata
-            console.log(`[${requestId}] Document ${documentId} found in embeddings bucket`);
-            
-            const metadata = await getEmbeddingMetadata(documentId, requestId);
-            
-            return {
-                documentId,
-                status: 'completed',
-                stage: 'embedding',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                    processingTime: metadata?.processingDurationMs,
-                    embeddingCount: metadata?.embeddingCount,
-                    vectorDimensions: metadata?.vectorDimensions,
-                    embeddingModel: metadata?.embeddingModel
-                }
-            };
-        }
-        
-        // Check if there's an embedding error
-        const errorStatus = await checkEmbeddingError(documentId, requestId);
-        if (errorStatus) {
-            return errorStatus;
+        if (embeddingStatus) {
+            return embeddingStatus;
         }
         
         // Check if processed content exists (prerequisite for embedding)
         const processedContentExists = await checkProcessedContentExists(documentId, requestId);
         
         if (processedContentExists) {
-            // Processed content exists but embeddings not generated yet
-            console.log(`[${requestId}] Document ${documentId} has processed content but embeddings not generated yet`);
-            
-            return {
-                documentId,
-                status: 'processing',
-                stage: 'embedding',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                    processingTime: Date.now() - startTime
-                }
-            };
-        } else {
-            // Processed content doesn't exist - document processing not complete
-            console.log(`[${requestId}] Document ${documentId} processed content not found`);
+            // Document has been processed but embeddings not started yet
+            console.log(`[${requestId}] Document ${documentId} processed but embeddings not started`);
             
             return {
                 documentId,
@@ -146,7 +113,21 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
                 stage: 'embedding',
                 timestamp: new Date().toISOString(),
                 metadata: {
-                    errorMessage: 'Document processing not complete yet - no processed content available for embedding'
+                    processingTime: Date.now() - startTime,
+                    errorMessage: 'Document processed but embedding generation not started yet'
+                }
+            };
+        } else {
+            // Document hasn't been processed yet
+            console.log(`[${requestId}] Document ${documentId} not yet processed`);
+            
+            return {
+                documentId,
+                status: 'pending',
+                stage: 'embedding',
+                timestamp: new Date().toISOString(),
+                metadata: {
+                    errorMessage: 'Document not yet processed - prerequisite for embedding generation'
                 }
             };
         }
@@ -166,92 +147,97 @@ async function getDocumentEmbeddingStatus(documentId: string, requestId: string)
     }
 }
 
-async function checkS3ObjectExists(bucketName: string, key: string, requestId: string): Promise<boolean> {
+async function findDocumentEmbeddingStatus(documentId: string, requestId: string): Promise<DocumentStatus | null> {
     try {
-        await s3Client.send(new HeadObjectCommand({
-            Bucket: bucketName,
-            Key: key
-        }));
+        // Try to find any embedding object for this document
+        // Check a specific chunk pattern first (most common case)
+        const embeddingKeys = [
+            `embeddings/${documentId}/chunk-0.json`,
+            `embeddings/${documentId}/chunk-1.json`,
+            `embeddings/${documentId}/chunk-2.json`
+        ];
         
-        console.log(`[${requestId}] Object exists: s3://${bucketName}/${key}`);
-        return true;
-        
-    } catch (error: any) {
-        if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
-            console.log(`[${requestId}] Object not found: s3://${bucketName}/${key}`);
-            return false;
-        }
-        
-        console.error(`[${requestId}] Error checking object existence s3://${bucketName}/${key}:`, error);
-        throw error;
-    }
-}
-
-async function getEmbeddingMetadata(documentId: string, requestId: string): Promise<EmbeddingMetadata | null> {
-    try {
-        const embeddingsKey = `embeddings/${documentId}.json`;
-        
-        const command = new HeadObjectCommand({
-            Bucket: EMBEDDINGS_BUCKET,
-            Key: embeddingsKey
-        });
-        
-        const response = await s3Client.send(command);
-        
-        // Extract metadata from S3 object metadata
-        const metadata: EmbeddingMetadata = {
-            documentId,
-            embeddingModel: response.Metadata?.['embedding-model'] || 'amazon.titan-embed-text-v1',
-            vectorDimensions: parseInt(response.Metadata?.['vector-dimensions'] || '1536'),
-            embeddingCount: parseInt(response.Metadata?.['embedding-count'] || '0'),
-            processingStartTime: response.Metadata?.['processing-start-time'] || new Date().toISOString(),
-            processingEndTime: response.Metadata?.['processing-end-time'] || new Date().toISOString(),
-            processingDurationMs: parseInt(response.Metadata?.['processing-duration-ms'] || '0')
-        };
-        
-        console.log(`[${requestId}] Retrieved embedding metadata for document ${documentId}:`, metadata);
-        return metadata;
-        
-    } catch (error) {
-        console.error(`[${requestId}] Error getting embedding metadata for ${documentId}:`, error);
-        return null;
-    }
-}
-
-async function checkEmbeddingError(documentId: string, requestId: string): Promise<DocumentStatus | null> {
-    try {
-        // Check for error status files in embedding status bucket
-        const errorKey = `errors/${documentId}.json`;
-        const errorExists = await checkS3ObjectExists(EMBEDDING_STATUS_BUCKET, errorKey, requestId);
-        
-        if (errorExists) {
-            console.log(`[${requestId}] Found embedding error status for document ${documentId}`);
-            
-            // Get error details from metadata
-            const command = new HeadObjectCommand({
-                Bucket: EMBEDDING_STATUS_BUCKET,
-                Key: errorKey
-            });
-            
-            const response = await s3Client.send(command);
-            
-            return {
-                documentId,
-                status: 'failed',
-                stage: 'embedding',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                    errorMessage: response.Metadata?.['error-message'] || 'Embedding generation failed',
-                    processingTime: parseInt(response.Metadata?.['processing-duration-ms'] || '0')
+        // Check first few chunks to determine status
+        for (const embeddingKey of embeddingKeys) {
+            try {
+                const response = await s3Client.send(new HeadObjectCommand({
+                    Bucket: EMBEDDINGS_BUCKET,
+                    Key: embeddingKey
+                }));
+                
+                // Found an embedding object - check its status
+                const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
+                const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
+                const chunkId = response.Metadata?.['chunk-id'] || 'unknown';
+                const chunkIndex = parseInt(response.Metadata?.['chunk-index'] || '0');
+                
+                console.log(`[${requestId}] Found embedding object: ${embeddingKey}`);
+                console.log(`[${requestId}]   Processing status: ${processingStatus}`);
+                console.log(`[${requestId}]   Is placeholder: ${isPlaceholder}`);
+                console.log(`[${requestId}]   Chunk ID: ${chunkId}`);
+                
+                if (processingStatus === 'completed' && !isPlaceholder) {
+                    // At least one chunk is completed - embedding generation is working
+                    return {
+                        documentId,
+                        status: 'completed', // We found at least one completed chunk
+                        stage: 'embedding',
+                        timestamp: response.Metadata?.['processed-at'] || new Date().toISOString(),
+                        metadata: {
+                            processingTime: parseInt(response.Metadata?.['processing-time-ms'] || '0'),
+                            vectorDimensions: parseInt(response.Metadata?.['embedding-dimensions'] || '0'),
+                            embeddingModel: response.Metadata?.['embedding-model'] || 'amazon.titan-embed-text-v2:0',
+                            isPlaceholder: false,
+                            chunkId: chunkId,
+                            chunkIndex: chunkIndex
+                        }
+                    };
+                } else if (processingStatus === 'failed') {
+                    // This chunk failed
+                    return {
+                        documentId,
+                        status: 'failed',
+                        stage: 'embedding',
+                        timestamp: response.Metadata?.['failed-at'] || new Date().toISOString(),
+                        metadata: {
+                            processingTime: parseInt(response.Metadata?.['processing-time-ms'] || '0'),
+                            errorMessage: response.Metadata?.['error-message'] || 'Embedding generation failed',
+                            isPlaceholder: true,
+                            chunkId: chunkId,
+                            chunkIndex: chunkIndex
+                        }
+                    };
+                } else if (processingStatus === 'processing' && isPlaceholder) {
+                    // This chunk is currently being processed
+                    return {
+                        documentId,
+                        status: 'processing',
+                        stage: 'embedding',
+                        timestamp: response.Metadata?.['queued-at'] || new Date().toISOString(),
+                        metadata: {
+                            processingTime: Date.now() - new Date(response.Metadata?.['queued-at'] || new Date().toISOString()).getTime(),
+                            isPlaceholder: true,
+                            chunkId: chunkId,
+                            chunkIndex: chunkIndex
+                        }
+                    };
                 }
-            };
+                
+            } catch (error: any) {
+                if (error.name === 'NotFound') {
+                    // This chunk doesn't exist yet, try next one
+                    continue;
+                } else {
+                    throw error; // Re-throw other errors
+                }
+            }
         }
         
-        return null;
+        return null; // No embedding objects found
         
     } catch (error) {
-        console.error(`[${requestId}] Error checking embedding error for ${documentId}:`, error);
-        return null;
+        console.error(`[${requestId}] Error finding embedding status for ${documentId}:`, error);
+        throw error;
     }
 }
 
@@ -259,13 +245,30 @@ async function checkProcessedContentExists(documentId: string, requestId: string
     try {
         // Check for processed content file
         const processedContentKey = `processed/${documentId}.json`;
-        const exists = await checkS3ObjectExists(PROCESSED_CONTENT_BUCKET, processedContentKey, requestId);
+        
+        const response = await s3Client.send(new HeadObjectCommand({
+            Bucket: PROCESSED_CONTENT_BUCKET,
+            Key: processedContentKey
+        }));
+        
+        // Check if it's completed (not just a placeholder)
+        const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
+        const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
+        
+        const exists = processingStatus === 'completed' && !isPlaceholder;
         
         console.log(`[${requestId}] Processed content exists check for ${documentId}: ${exists}`);
+        console.log(`[${requestId}]   Processing status: ${processingStatus}, Is placeholder: ${isPlaceholder}`);
+        
         return exists;
         
-    } catch (error) {
+    } catch (error: any) {
+        if (error.name === 'NotFound') {
+            console.log(`[${requestId}] Processed content not found for ${documentId}`);
+            return false;
+        }
+        
         console.error(`[${requestId}] Error checking processed content existence for ${documentId}:`, error);
-        return false;
+        throw error;
     }
 } 

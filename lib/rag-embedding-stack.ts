@@ -78,57 +78,14 @@ export class RagEmbeddingStack extends cdk.Stack {
         // === S3 BUCKETS FOR EMBEDDINGS STORAGE ===
 
         // S3 bucket for embeddings (consumed by vector storage service)
-        const embeddingsBucket = new s3.Bucket(this, 'EmbBucket', {
+        const embeddingsBucket = new s3.Bucket(this, 'EmbEmbeddingsBucket', {
             bucketName: `rag-embeddings-${this.account}-${this.region}`,
-            versioned: false,
-            removalPolicy: cdk.RemovalPolicy.DESTROY, // For development
-            autoDeleteObjects: true, // For development
-            lifecycleRules: [{
-                id: 'DeleteOldEmbeddings',
-                enabled: true,
-                expiration: cdk.Duration.days(90), // Longer retention for embeddings
-            }],
-            publicReadAccess: false,
-            blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-        });
-
-        // S3 bucket for embedding status/completion events
-        const embeddingStatusBucket = new s3.Bucket(this, 'EmbStatusBucket', {
-            bucketName: `rag-embedding-status-${this.account}-${this.region}`,
-            versioned: false,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
             autoDeleteObjects: true,
-            lifecycleRules: [{
-                id: 'DeleteOldEmbeddingStatus',
-                enabled: true,
-                expiration: cdk.Duration.days(14), // Status events don't need long retention
-            }],
+            versioned: true,
             publicReadAccess: false,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         });
-
-        // Account-level bucket policies for cross-service access
-        embeddingsBucket.addToResourcePolicy(new iam.PolicyStatement({
-            sid: 'AllowVectorStorageServiceAccess',
-            effect: iam.Effect.ALLOW,
-            principals: [new iam.AccountPrincipal(this.account)],
-            actions: [
-                's3:GetObject',
-                's3:ListBucket'
-            ],
-            resources: [
-                embeddingsBucket.bucketArn,
-                `${embeddingsBucket.bucketArn}/*`
-            ],
-            conditions: {
-                'StringLike': {
-                    'aws:PrincipalArn': [
-                        `arn:aws:iam::${this.account}:role/RagVectorStorageStack-EmbeddingPoller*`,
-                        `arn:aws:iam::${this.account}:role/RagVectorStorageStack-VectorProcessor*`
-                    ]
-                }
-            }
-        }));
 
         // === LAMBDA FUNCTIONS ===
 
@@ -162,25 +119,16 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         // Embedding processor Lambda (processes SQS messages, calls Bedrock API)
-        const embeddingProcessorHandler = new NodejsFunction(this, 'EmbProcessorHandler', {
+        const embeddingProcessorHandler = new NodejsFunction(this, 'EmbEmbeddingProcessorHandler', {
             functionName: `rag-embedding-processor-${this.account}-${this.region}`,
-            runtime: lambda.Runtime.NODEJS_22_X,
+            runtime: lambda.Runtime.NODEJS_18_X,
             handler: 'handler',
             entry: 'lib/handlers/src/embedding-processor.ts',
-            timeout: cdk.Duration.minutes(15),
-            memorySize: 2048,
+            timeout: cdk.Duration.minutes(5),
+            memorySize: 1024,
             logRetention: logs.RetentionDays.ONE_WEEK,
-            role: new iam.Role(this, 'EmbProcessorRole', {
-                path: '/rag/embedding/',                                                 // ← Hierarchical path
-                roleName: `processor-${this.account}-${this.region}`,                   // ← Role name only
-                assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-                managedPolicies: [
-                    iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
-                ]
-            }),
             environment: {
-                EMBEDDINGS_BUCKET_NAME: embeddingsBucket.bucketName,
-                EMBEDDING_STATUS_BUCKET_NAME: embeddingStatusBucket.bucketName,
+                EMBEDDINGS_BUCKET: embeddingsBucket.bucketName,
                 AWS_ACCOUNT_ID: this.account,
             },
         });
@@ -204,8 +152,21 @@ export class RagEmbeddingStack extends cdk.Stack {
             }),
             environment: {
                 EMBEDDINGS_BUCKET_NAME: embeddingsBucket.bucketName,
-                EMBEDDING_STATUS_BUCKET_NAME: embeddingStatusBucket.bucketName,
                 AWS_ACCOUNT_ID: this.account,
+            },
+        });
+
+        // Status handler Lambda
+        const statusHandler = new NodejsFunction(this, 'EmbStatusHandler', {
+            entry: __dirname + '/handlers/src/status-handler.ts',
+            runtime: lambda.Runtime.NODEJS_22_X,
+            timeout: cdk.Duration.seconds(30),
+            memorySize: 256,
+            projectRoot: __dirname + '/handlers',
+            depsLockFilePath: __dirname + '/handlers/package-lock.json',
+            environment: {
+                EMBEDDINGS_BUCKET: embeddingsBucket.bucketName,
+                PROCESSED_CONTENT_BUCKET: processedContentBucketName,
             },
         });
 
@@ -240,12 +201,11 @@ export class RagEmbeddingStack extends cdk.Stack {
         checkpointTable.grantReadWriteData(s3PollerHandler);
 
         // Embedding processor permissions
-        embeddingsBucket.grantWrite(embeddingProcessorHandler);
-        embeddingStatusBucket.grantWrite(embeddingProcessorHandler);
+        embeddingsBucket.grantReadWrite(embeddingProcessorHandler);
         embeddingProcessingQueue.grantConsumeMessages(embeddingProcessorHandler);
 
         // Add Bedrock permissions for embedding generation
-        embeddingProcessorHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+        embeddingProcessorHandler.addToRolePolicy(new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             actions: [
                 'bedrock:InvokeModel'
@@ -257,7 +217,13 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         // DLQ handler permissions
         embeddingProcessingDlq.grantConsumeMessages(dlqHandlerHandler);
-        embeddingStatusBucket.grantWrite(dlqHandlerHandler);
+
+        // Grant permissions to read from processed content bucket
+        const processedContentS3Bucket = s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucketRef', processedContentBucketName);
+        processedContentS3Bucket.grantRead(embeddingProcessorHandler);
+        processedContentS3Bucket.grantRead(statusHandler);
+
+        embeddingsBucket.grantRead(statusHandler);
 
         // === ONDEMANDENV SHARE OUT (PRODUCING) - Moved to end of constructor ===
 
@@ -337,17 +303,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         this.httpApi.addRoutes({
             path: '/status/{documentId}',
             methods: [apigatewayv2.HttpMethod.GET],
-            integration: new apigatewayv2Integrations.HttpLambdaIntegration('EmbStatusIntegration', new NodejsFunction(this, 'EmbStatusHandler', {
-                entry: __dirname + '/handlers/src/status-handler.ts',
-                runtime: lambda.Runtime.NODEJS_22_X,
-                timeout: cdk.Duration.seconds(30),
-                memorySize: 256,
-                environment: {
-                    EMBEDDINGS_BUCKET: embeddingsBucket.bucketName,
-                    EMBEDDING_STATUS_BUCKET: embeddingStatusBucket.bucketName,
-                    PROCESSED_CONTENT_BUCKET: processedContentBucketName,
-                },
-            })),
+            integration: new apigatewayv2Integrations.HttpLambdaIntegration('EmbStatusIntegration', statusHandler),
         });
 
         // Set up custom domain for API Gateway
@@ -392,7 +348,6 @@ export class RagEmbeddingStack extends cdk.Stack {
             this, new Map([
                 // S3 bucket resources for downstream services
                 [myEnver.embeddingStorage.embeddingsBucket, embeddingsBucket.bucketName],
-                [myEnver.embeddingStorage.embeddingStatusBucket, embeddingStatusBucket.bucketName],
 
                 // Status API endpoint for WebUI tracking
                 [myEnver.statusApi.statusApiEndpoint, `https://${this.apiDomain}/status`],

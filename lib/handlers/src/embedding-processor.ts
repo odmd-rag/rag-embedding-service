@@ -1,15 +1,14 @@
 import { SQSEvent, SQSRecord, Context } from 'aws-lambda';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { createHash } from 'crypto';
 
 // Initialize AWS clients
-const s3Client = new S3Client({});
-const bedrockClient = new BedrockRuntimeClient({});
+const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
+const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
-// Environment variables
-const EMBEDDINGS_BUCKET_NAME = process.env.EMBEDDINGS_BUCKET_NAME!;
-const EMBEDDING_STATUS_BUCKET_NAME = process.env.EMBEDDING_STATUS_BUCKET_NAME!;
+// Environment variables - only need embeddings bucket now
+const EMBEDDINGS_BUCKET_NAME = process.env.EMBEDDINGS_BUCKET!;
 
 // Interfaces
 interface EmbeddingTaskMessage {
@@ -63,42 +62,42 @@ export const handler = async (event: SQSEvent, context: Context): Promise<void> 
     const startTime = Date.now();
     const requestId = context.awsRequestId;
     
-    console.log(`[${requestId}] === Embedding Processor Started ===`);
+    console.log(`[${requestId}] === Embedding Processor Lambda Started ===`);
     console.log(`[${requestId}] Function: ${context.functionName}:${context.functionVersion}`);
     console.log(`[${requestId}] Memory limit: ${context.memoryLimitInMB}MB`);
     console.log(`[${requestId}] Remaining time: ${context.getRemainingTimeInMillis()}ms`);
-    console.log(`[${requestId}] Processing ${event.Records.length} SQS messages`);
+    console.log(`[${requestId}] Records to process: ${event.Records.length}`);
 
-    const results = [];
-    
-    for (const [index, record] of event.Records.entries()) {
+    let processedCount = 0;
+    let failedCount = 0;
+
+    // Process each SQS record
+    for (const record of event.Records) {
         const recordStartTime = Date.now();
-        console.log(`\n[${requestId}] 📄 Processing SQS record ${index + 1}/${event.Records.length}: ${record.messageId}`);
-        console.log(`[${requestId}]   Receipt handle: ${record.receiptHandle.substring(0, 20)}...`);
-        console.log(`[${requestId}]   Message attributes:`, JSON.stringify(record.messageAttributes, null, 2));
-        console.log(`[${requestId}]   Approximate receive count: ${record.attributes.ApproximateReceiveCount}`);
-        console.log(`[${requestId}]   Sent timestamp: ${new Date(parseInt(record.attributes.SentTimestamp)).toISOString()}`);
-        
         try {
-            const result = await processEmbeddingTask(record, requestId);
-            results.push(result);
+            console.log(`[${requestId}] Processing SQS record: ${record.messageId}`);
+            const chunkId = await processEmbeddingTask(record, requestId);
+            processedCount++;
             
             const recordDuration = Date.now() - recordStartTime;
-            console.log(`[${requestId}] ✅ Successfully processed record ${index + 1} in ${recordDuration}ms`);
-            console.log(`[${requestId}]   Result: ${result}`);
+            console.log(`[${requestId}] ✅ Successfully processed record ${record.messageId} (chunk: ${chunkId}) in ${recordDuration}ms`);
             
         } catch (error) {
+            failedCount++;
             const recordDuration = Date.now() - recordStartTime;
-            console.error(`[${requestId}] ❌ Failed to process SQS record ${record.messageId} after ${recordDuration}ms:`, error);
-            console.error(`[${requestId}]   Error type: ${error instanceof Error ? error.constructor.name : typeof error}`);
-            console.error(`[${requestId}]   Error message: ${error instanceof Error ? error.message : 'Unknown error'}`);
-            // Let the message go to DLQ by throwing
+            console.error(`[${requestId}] ❌ Failed to process record ${record.messageId} after ${recordDuration}ms:`, error);
+            
+            // Let SQS handle retries by throwing
             throw error;
         }
     }
 
     const totalDuration = Date.now() - startTime;
-    console.log(`[${requestId}] ✅ Embedding processing complete. Processed ${results.length}/${event.Records.length} messages in ${totalDuration}ms`);
+    console.log(`[${requestId}] === Embedding Processor Lambda Completed ===`);
+    console.log(`[${requestId}] Total execution time: ${totalDuration}ms`);
+    console.log(`[${requestId}] Processed: ${processedCount}/${event.Records.length}`);
+    console.log(`[${requestId}] Failed: ${failedCount}/${event.Records.length}`);
+    console.log(`[${requestId}] Final remaining time: ${context.getRemainingTimeInMillis()}ms`);
 };
 
 /**
@@ -106,10 +105,9 @@ export const handler = async (event: SQSEvent, context: Context): Promise<void> 
  */
 async function processEmbeddingTask(record: SQSRecord, requestId: string): Promise<string> {
     const startTime = Date.now();
-    console.log(`[${requestId}] 🔍 Step 1: Parsing SQS message body...`);
     
     try {
-        // Parse the message body
+        console.log(`[${requestId}] 🔍 Step 1: Parsing SQS message...`);
         const embeddingTask: EmbeddingTaskMessage = JSON.parse(record.body);
         
         console.log(`[${requestId}] ✅ Step 1 PASSED: Message parsed successfully`);
@@ -121,10 +119,11 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         console.log(`[${requestId}]   Content length: ${embeddingTask.content.length} chars`);
         console.log(`[${requestId}]   Content preview: "${embeddingTask.content.substring(0, 100)}..."`);
         console.log(`[${requestId}]   Original document: ${embeddingTask.originalDocumentInfo.bucketName}/${embeddingTask.originalDocumentInfo.objectKey}`);
-        console.log(`[${requestId}]   Content type: ${embeddingTask.originalDocumentInfo.contentType}`);
-        console.log(`[${requestId}]   File size: ${embeddingTask.originalDocumentInfo.fileSize} bytes`);
         console.log(`[${requestId}]   Source: ${embeddingTask.source}`);
-        console.log(`[${requestId}]   Timestamp: ${new Date(embeddingTask.timestamp).toISOString()}`);
+
+        // 🎯 Step 1.5: Create embedding placeholder immediately
+        const embeddingKey = `embeddings/${embeddingTask.documentId}/${embeddingTask.chunkId}.json`;
+        await createEmbeddingPlaceholder(embeddingKey, embeddingTask, requestId);
 
         console.log(`[${requestId}] 🔍 Step 2: Generating embedding via AWS Bedrock...`);
         
@@ -160,10 +159,15 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         };
 
         console.log(`[${requestId}] ✅ Step 3 PASSED: Embedding result created`);
-        console.log(`[${requestId}] 🔍 Step 4: Storing embedding result in S3...`);
+        console.log(`[${requestId}] 🔍 Step 4: Storing embedding result with completion status...`);
 
-        // Store embedding result in S3
-        await storeEmbeddingResult(embeddingResult, requestId);
+        // Store final embedding result with completion status
+        await storeEmbeddingResultWithStatus(
+            embeddingKey,
+            embeddingResult,
+            Date.now() - startTime,
+            requestId
+        );
 
         const totalDuration = Date.now() - startTime;
         console.log(`[${requestId}] ✅ Step 4 PASSED: Embedding result stored`);
@@ -176,9 +180,132 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         const totalDuration = Date.now() - startTime;
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         console.error(`[${requestId}] ❌ Failed to process embedding task after ${totalDuration}ms:`, error);
-        console.error(`[${requestId}]   Error type: ${error instanceof Error ? error.constructor.name : typeof error}`);
-        console.error(`[${requestId}]   Error message: ${errorMessage}`);
+        
+        // Update placeholder with failure status
+        const embeddingTask = JSON.parse(record.body);
+        const embeddingKey = `embeddings/${embeddingTask.documentId}/${embeddingTask.chunkId}.json`;
+        await updatePlaceholderWithFailure(
+            embeddingKey,
+            embeddingTask.documentId,
+            embeddingTask.chunkId,
+            totalDuration,
+            errorMessage,
+            requestId
+        );
+        
         throw error;
+    }
+}
+
+async function createEmbeddingPlaceholder(
+    objectKey: string,
+    embeddingTask: EmbeddingTaskMessage,
+    requestId: string
+): Promise<void> {
+    console.log(`[${requestId}] 📍 Creating embedding placeholder: ${objectKey}`);
+    
+    const placeholder = {
+        documentId: embeddingTask.documentId,
+        chunkId: embeddingTask.chunkId,
+        chunkIndex: embeddingTask.chunkIndex,
+        status: 'processing',
+        queuedAt: new Date().toISOString(),
+        placeholder: true,
+        taskInfo: {
+            processingId: embeddingTask.processingId,
+            contentLength: embeddingTask.content.length,
+            originalDocumentInfo: embeddingTask.originalDocumentInfo,
+            source: embeddingTask.source
+        }
+    };
+
+    await s3Client.send(new PutObjectCommand({
+        Bucket: EMBEDDINGS_BUCKET_NAME,
+        Key: objectKey,
+        Body: JSON.stringify(placeholder, null, 2),
+        ContentType: 'application/json',
+        Metadata: {
+            'processing-status': 'processing',
+            'document-id': embeddingTask.documentId,
+            'chunk-id': embeddingTask.chunkId,
+            'chunk-index': embeddingTask.chunkIndex.toString(),
+            'placeholder': 'true',
+            'queued-at': new Date().toISOString(),
+            'content-length': embeddingTask.content.length.toString(),
+            'processing-id': embeddingTask.processingId,
+            'source': embeddingTask.source
+        }
+    }));
+    
+    console.log(`[${requestId}] ✅ Embedding placeholder created with immediate status visibility`);
+}
+
+async function storeEmbeddingResultWithStatus(
+    objectKey: string,
+    embeddingResult: EmbeddingResult,
+    totalProcessingTimeMs: number,
+    requestId: string
+): Promise<void> {
+    console.log(`[${requestId}] 💾 Storing final embedding result with completion status: ${objectKey}`);
+
+    // Replace placeholder with final embedding result - atomic update
+    await s3Client.send(new PutObjectCommand({
+        Bucket: EMBEDDINGS_BUCKET_NAME,
+        Key: objectKey,
+        Body: JSON.stringify(embeddingResult, null, 2),
+        ContentType: 'application/json',
+        Metadata: {
+            'processing-status': 'completed',
+            'document-id': embeddingResult.documentId,
+            'chunk-id': embeddingResult.chunkId,
+            'chunk-index': embeddingResult.chunkIndex.toString(),
+            'placeholder': 'false',
+            'processed-at': embeddingResult.processedAt,
+            'processing-time-ms': totalProcessingTimeMs.toString(),
+            'embedding-dimensions': embeddingResult.embeddingMetadata.dimensions.toString(),
+            'token-count': embeddingResult.embeddingMetadata.tokenCount.toString(),
+            'embedding-model': embeddingResult.embeddingMetadata.model,
+            'source': embeddingResult.source
+        }
+    }));
+
+    console.log(`[${requestId}] ✅ Final embedding result stored with completion status`);
+}
+
+async function updatePlaceholderWithFailure(
+    objectKey: string,
+    documentId: string,
+    chunkId: string,
+    totalProcessingTimeMs: number,
+    errorMessage: string,
+    requestId: string
+): Promise<void> {
+    console.log(`[${requestId}] ❌ Updating placeholder with failure status: ${objectKey}`);
+    
+    try {
+        // Update placeholder metadata to failed status, keep placeholder content
+        await s3Client.send(new CopyObjectCommand({
+            Bucket: EMBEDDINGS_BUCKET_NAME,
+            Key: objectKey,
+            CopySource: `${EMBEDDINGS_BUCKET_NAME}/${objectKey}`,
+            Metadata: {
+                'processing-status': 'failed',
+                'document-id': documentId,
+                'chunk-id': chunkId,
+                'placeholder': 'true',
+                'failed-at': new Date().toISOString(),
+                'processing-time-ms': totalProcessingTimeMs.toString(),
+                'error-message': errorMessage.substring(0, 1000), // Truncate for S3 metadata limit
+                'embedding-source': 'embedding-processor'
+            },
+            MetadataDirective: 'REPLACE'
+        }));
+        
+        console.log(`[${requestId}] ✅ Placeholder updated with failure status`);
+        
+    } catch (error) {
+        console.error(`[${requestId}] Failed to update placeholder with failure status:`, error);
+        // Don't throw - we still want to propagate the original error
     }
 }
 
@@ -244,71 +371,6 @@ async function generateEmbedding(text: string, requestId: string): Promise<Bedro
         console.error(`[${requestId}] ❌ Failed to generate embedding after ${totalDuration}ms:`, error);
         console.error(`[${requestId}]   Error type: ${error instanceof Error ? error.constructor.name : typeof error}`);
         console.error(`[${requestId}]   Error message: ${errorMessage}`);
-        throw error;
-    }
-}
-
-/**
- * Store embedding result in S3
- */
-async function storeEmbeddingResult(embeddingResult: EmbeddingResult, requestId: string): Promise<void> {
-    try {
-        // Generate timestamp-hash key for the embedding
-        const timestamp = new Date().toISOString();
-        const hashInput = `${timestamp}${embeddingResult.chunkId}${embeddingResult.documentId}`;
-        const hash = createHash('sha256').update(hashInput).digest('hex');
-        const objectKey = `${timestamp}-${hash}.json`;
-
-        console.log(`[${requestId}] Storing embedding result: ${objectKey}`);
-
-        // Store in embeddings bucket
-        await s3Client.send(new PutObjectCommand({
-            Bucket: EMBEDDINGS_BUCKET_NAME,
-            Key: objectKey,
-            Body: JSON.stringify(embeddingResult, null, 2),
-            ContentType: 'application/json',
-            Metadata: {
-                'document-id': embeddingResult.documentId,
-                'processing-id': embeddingResult.processingId,
-                'chunk-id': embeddingResult.chunkId,
-                'chunk-index': embeddingResult.chunkIndex.toString(),
-                'embedding-dimensions': embeddingResult.embeddingMetadata.dimensions.toString(),
-                'token-count': embeddingResult.embeddingMetadata.tokenCount.toString(),
-                'source': embeddingResult.source
-            }
-        }));
-
-        // Store status in status bucket (for monitoring/tracking)
-        const statusKey = `${timestamp}-${hash}-status.json`;
-        const statusData = {
-            documentId: embeddingResult.documentId,
-            processingId: embeddingResult.processingId,
-            chunkId: embeddingResult.chunkId,
-            chunkIndex: embeddingResult.chunkIndex,
-            status: 'completed',
-            embeddingDimensions: embeddingResult.embeddingMetadata.dimensions,
-            tokenCount: embeddingResult.embeddingMetadata.tokenCount,
-            processingTimeMs: embeddingResult.embeddingMetadata.processingTimeMs,
-            processedAt: embeddingResult.processedAt,
-            embeddingObjectKey: objectKey
-        };
-
-        await s3Client.send(new PutObjectCommand({
-            Bucket: EMBEDDING_STATUS_BUCKET_NAME,
-            Key: statusKey,
-            Body: JSON.stringify(statusData, null, 2),
-            ContentType: 'application/json',
-            Metadata: {
-                'document-id': embeddingResult.documentId,
-                'chunk-id': embeddingResult.chunkId,
-                'status': 'completed'
-            }
-        }));
-
-        console.log(`[${requestId}] ✅ Stored embedding result and status in S3`);
-        
-    } catch (error) {
-        console.error(`[${requestId}] ❌ Failed to store embedding result:`, error);
         throw error;
     }
 } 

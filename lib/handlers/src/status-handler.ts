@@ -1,5 +1,5 @@
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
 
@@ -91,169 +91,122 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
 async function getDocumentEmbeddingStatus(documentId: string, requestId: string): Promise<DocumentStatus> {
     const startTime = Date.now();
     
-    try {
-        const embeddingStatus = await findDocumentEmbeddingStatus(documentId, requestId);
-        
-        if (embeddingStatus) {
-            return embeddingStatus;
-        }
-        
-        const processedContentExists = await checkProcessedContentExists(documentId, requestId);
-        
-        if (processedContentExists) {
-            console.log(`[${requestId}] Document ${documentId} processed but embeddings not started`);
-            
-            return {
-                documentId,
-                status: 'pending',
-                stage: 'embedding',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                    processingTime: Date.now() - startTime,
-                    errorMessage: 'Document processed but embedding generation not started yet'
-                }
-            };
-        } else {
-            console.log(`[${requestId}] Document ${documentId} not yet processed`);
-            
-            return {
-                documentId,
-                status: 'pending',
-                stage: 'embedding',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                    errorMessage: 'Document not yet processed - prerequisite for embedding generation'
-                }
-            };
-        }
-        
-    } catch (error) {
-        console.error(`[${requestId}] Error checking embedding status for ${documentId}:`, error);
-        
+    // 1. Check for final "completed" status object
+    const finalStatus = await getFinalEmbeddingStatus(documentId, requestId);
+    if (finalStatus) {
         return {
             documentId,
-            status: 'failed',
+            status: 'completed',
             stage: 'embedding',
-            timestamp: new Date().toISOString(),
+            timestamp: finalStatus.completedAt,
             metadata: {
-                errorMessage: `Embedding status check failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+                ...finalStatus.summary,
+                processingTime: Date.now() - startTime,
             }
         };
     }
+
+    // 2. Check if currently processing (any chunk exists)
+    const isProcessing = await isEmbeddingInProgress(documentId, requestId);
+    if (isProcessing) {
+        return {
+            documentId,
+            status: 'processing',
+            stage: 'embedding',
+            timestamp: new Date().toISOString(),
+            metadata: {
+                processingTime: Date.now() - startTime,
+            }
+        };
+    }
+
+    // 3. Check if the prerequisite (processed content) is ready
+    const isReadyForEmbedding = await checkProcessedContentIsReady(documentId, requestId);
+    if (isReadyForEmbedding) {
+        return {
+            documentId,
+            status: 'pending',
+            stage: 'embedding',
+            timestamp: new Date().toISOString(),
+            metadata: {
+                errorMessage: 'Document processed, embedding is pending.',
+                processingTime: Date.now() - startTime,
+            }
+        };
+    }
+
+    // 4. If nothing else, it's pending upstream processing
+    return {
+        documentId,
+        status: 'pending',
+        stage: 'embedding',
+        timestamp: new Date().toISOString(),
+        metadata: {
+            errorMessage: 'Upstream document processing has not completed yet.',
+            processingTime: Date.now() - startTime,
+        }
+    };
 }
 
-async function findDocumentEmbeddingStatus(documentId: string, requestId: string): Promise<DocumentStatus | null> {
+async function getFinalEmbeddingStatus(documentId: string, requestId: string): Promise<any | null> {
+    const statusKey = `embedding-status/${documentId}.json`;
     try {
-        const embeddingKeys = [
-            `embeddings/${documentId}/chunk-0.json`,
-            `embeddings/${documentId}/chunk-1.json`,
-            `embeddings/${documentId}/chunk-2.json`
-        ];
-        
-        for (const embeddingKey of embeddingKeys) {
-            try {
-                const response = await s3Client.send(new HeadObjectCommand({
-                    Bucket: EMBEDDINGS_BUCKET,
-                    Key: embeddingKey
-                }));
-                
-                const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
-                const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
-                const chunkId = response.Metadata?.['chunk-id'] || 'unknown';
-                const chunkIndex = parseInt(response.Metadata?.['chunk-index'] || '0');
-                
-                console.log(`[${requestId}] Found embedding object: ${embeddingKey}`);
-                console.log(`[${requestId}]   Processing status: ${processingStatus}`);
-                console.log(`[${requestId}]   Is placeholder: ${isPlaceholder}`);
-                console.log(`[${requestId}]   Chunk ID: ${chunkId}`);
-                
-                if (processingStatus === 'completed' && !isPlaceholder) {
-                    return {
-                        documentId,
-                        status: 'completed',
-                        stage: 'embedding',
-                        timestamp: response.Metadata?.['processed-at'] || new Date().toISOString(),
-                        metadata: {
-                            processingTime: parseInt(response.Metadata?.['processing-time-ms'] || '0'),
-                            vectorDimensions: parseInt(response.Metadata?.['embedding-dimensions'] || '0'),
-                            embeddingModel: response.Metadata?.['embedding-model'] || 'amazon.titan-embed-text-v2:0',
-                            isPlaceholder: false,
-                            chunkId: chunkId,
-                            chunkIndex: chunkIndex
-                        }
-                    };
-                } else if (processingStatus === 'failed') {
-                    return {
-                        documentId,
-                        status: 'failed',
-                        stage: 'embedding',
-                        timestamp: response.Metadata?.['failed-at'] || new Date().toISOString(),
-                        metadata: {
-                            processingTime: parseInt(response.Metadata?.['processing-time-ms'] || '0'),
-                            errorMessage: response.Metadata?.['error-message'] || 'Embedding generation failed',
-                            isPlaceholder: true,
-                            chunkId: chunkId,
-                            chunkIndex: chunkIndex
-                        }
-                    };
-                } else if (processingStatus === 'processing' && isPlaceholder) {
-                    return {
-                        documentId,
-                        status: 'processing',
-                        stage: 'embedding',
-                        timestamp: response.Metadata?.['queued-at'] || new Date().toISOString(),
-                        metadata: {
-                            processingTime: Date.now() - new Date(response.Metadata?.['queued-at'] || new Date().toISOString()).getTime(),
-                            isPlaceholder: true,
-                            chunkId: chunkId,
-                            chunkIndex: chunkIndex
-                        }
-                    };
-                }
-                
-            } catch (error: any) {
-                if (error.name === 'NotFound') {
-                    continue;
-                } else {
-                    throw error;
-                }
-            }
+        const command = new GetObjectCommand({
+            Bucket: EMBEDDINGS_BUCKET,
+            Key: statusKey,
+        });
+        const response = await s3Client.send(command);
+        const statusData = JSON.parse(await response.Body!.transformToString());
+        if (statusData.status === 'completed') {
+            console.log(`[${requestId}] Found final 'completed' status object for ${documentId}`);
+            return statusData;
         }
-        
         return null;
-        
-    } catch (error) {
-        console.error(`[${requestId}] Error finding embedding status for ${documentId}:`, error);
-        throw error;
+    } catch (error: any) {
+        if (error.name !== 'NotFound') {
+            console.error(`[${requestId}] Error fetching final status object for ${documentId}:`, error);
+        }
+        return null;
     }
 }
 
-async function checkProcessedContentExists(documentId: string, requestId: string): Promise<boolean> {
+async function isEmbeddingInProgress(documentId: string, requestId: string): Promise<boolean> {
     try {
-        const processedContentKey = `processed/${documentId}.json`;
-        
-        const response = await s3Client.send(new HeadObjectCommand({
-            Bucket: PROCESSED_CONTENT_BUCKET,
-            Key: processedContentKey
-        }));
-        
-        const processingStatus = response.Metadata?.['processing-status'] || 'unknown';
-        const isPlaceholder = response.Metadata?.['placeholder'] === 'true';
-        
-        const exists = processingStatus === 'completed' && !isPlaceholder;
-        
-        console.log(`[${requestId}] Processed content exists check for ${documentId}: ${exists}`);
-        console.log(`[${requestId}]   Processing status: ${processingStatus}, Is placeholder: ${isPlaceholder}`);
-        
-        return exists;
-        
-    } catch (error: any) {
-        if (error.name === 'NotFound') {
-            console.log(`[${requestId}] Processed content not found for ${documentId}`);
-            return false;
+        const listCommand = new ListObjectsV2Command({
+            Bucket: EMBEDDINGS_BUCKET,
+            Prefix: `embeddings/${documentId}/`,
+            MaxKeys: 1,
+        });
+        const response = await s3Client.send(listCommand);
+        const hasChunks = (response.Contents || []).length > 0;
+        if (hasChunks) {
+            console.log(`[${requestId}] Found existing embedding chunks for ${documentId}, status is 'processing'.`);
         }
-        
-        console.error(`[${requestId}] Error checking processed content existence for ${documentId}:`, error);
-        throw error;
+        return hasChunks;
+    } catch (error) {
+        console.error(`[${requestId}] Error listing embedding chunks for ${documentId}:`, error);
+        return false;
+    }
+}
+
+async function checkProcessedContentIsReady(documentId: string, requestId: string): Promise<boolean> {
+    const objectKey = `processed/${documentId}.json`;
+    try {
+        const command = new HeadObjectCommand({
+            Bucket: PROCESSED_CONTENT_BUCKET,
+            Key: objectKey,
+        });
+        const response = await s3Client.send(command);
+        const processingStatus = response.Metadata?.['processing-status'];
+        const isReady = processingStatus === 'completed';
+        if(isReady) {
+            console.log(`[${requestId}] Upstream processed content for ${documentId} is ready.`);
+        }
+        return isReady;
+    } catch (error: any) {
+        if (error.name !== 'NotFound') {
+            console.error(`[${requestId}] Error checking processed content for ${documentId}:`, error);
+        }
+        return false;
     }
 } 

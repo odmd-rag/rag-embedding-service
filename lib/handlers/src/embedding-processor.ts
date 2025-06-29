@@ -1,5 +1,5 @@
 import { SQSEvent, SQSRecord, Context, SQSBatchResponse, SQSBatchItemFailure, S3Event } from 'aws-lambda';
-import { S3Client, PutObjectCommand, PutObjectTaggingCommand, GetObjectCommand, GetObjectTaggingCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, GetObjectTaggingCommand, PutObjectTaggingCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
@@ -7,20 +7,19 @@ const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' })
 
 const EMBEDDINGS_BUCKET_NAME = process.env.EMBEDDINGS_BUCKET!;
 
-interface EmbeddingTaskMessage {
-    documentId: string;
-    processingId: string;
+interface ProcessedContentChunk {
     chunkId: string;
     chunkIndex: number;
     content: string;
-    originalDocumentInfo: {
-        bucketName: string;
-        objectKey: string;
-        contentType: string;
-        fileSize: number;
+}
+
+interface ProcessedContent {
+    documentId: string;
+    processingId: string;
+    processedContent: {
+        chunks: ProcessedContentChunk[];
     };
-    timestamp: number;
-    source: string;
+    originalDocument: any;
 }
 
 interface EmbeddingResult {
@@ -65,16 +64,16 @@ export const handler = async (event: SQSEvent, context: Context): Promise<SQSBat
     console.log(`[${requestId}] Records to process: ${event.Records.length}`);
 
     const batchItemFailures: SQSBatchItemFailure[] = [];
-
+    
     const processPromises = event.Records.map(async (record) => {
         const recordStartTime = Date.now();
         try {
             console.log(`[${requestId}] Processing SQS record: ${record.messageId}`);
-            const chunkId = await processEmbeddingTask(record, requestId);
+            await processEmbeddingTask(record, requestId);
             
             const recordDuration = Date.now() - recordStartTime;
-            console.log(`[${requestId}] ✅ Successfully processed record ${record.messageId} (chunk: ${chunkId}) in ${recordDuration}ms`);
-            return { success: true, messageId: record.messageId, chunkId };
+            console.log(`[${requestId}] ✅ Successfully processed record ${record.messageId} in ${recordDuration}ms`);
+            return { success: true, messageId: record.messageId };
             
         } catch (error) {
             const recordDuration = Date.now() - recordStartTime;
@@ -107,40 +106,35 @@ export const handler = async (event: SQSEvent, context: Context): Promise<SQSBat
 };
 
 /**
- * Process a single embedding task from SQS (S3 tagging event)
+ * Process a single S3 event from SQS
  */
-async function processEmbeddingTask(record: SQSRecord, requestId: string): Promise<string> {
+async function processEmbeddingTask(record: SQSRecord, requestId: string): Promise<void> {
     const startTime = Date.now();
     
+    console.log(`[${requestId}] 🔍 Step 1: Parsing S3 event from SQS message...`);
+    console.log(`[${requestId}] Raw SQS message body: ${record.body}`);
+
+    let s3Event: S3Event;
     try {
-        // Defensive parse to handle legacy messages
-        let parsed: any;
+        s3Event = JSON.parse(record.body);
+    } catch (e) {
+        console.error(`[${requestId}] ❌ Failed to parse SQS message body as JSON.`, e);
+        throw new Error("Invalid JSON in SQS message body");
+    }
+
+    if (!s3Event.Records || !Array.isArray(s3Event.Records)) {
+        console.error(`[${requestId}] ❌ Parsed message is not a valid S3 event. Body:`, record.body);
+        throw new Error("SQS message body is not a valid S3 event notification.");
+    }
+
+    for (const s3Record of s3Event.Records) {
+        const bucketName = s3Record.s3.bucket.name;
+        const objectKey = decodeURIComponent(s3Record.s3.object.key.replace(/\+/g, ' '));
+
         try {
-            parsed = JSON.parse(record.body);
-        } catch (err) {
-            console.warn(`[${requestId}] ⚠️ Could not parse record body as JSON, skipping.`);
-            return 'skipped';
-        }
+            console.log(`[${requestId}] 📋 S3 object details: Bucket: ${bucketName}, Key: ${objectKey}`);
 
-        // If this is a legacy embedding task message (has documentId), skip gracefully
-        if (parsed && parsed.documentId && parsed.chunkId) {
-            console.warn(`[${requestId}] ⚠️ Legacy embedding-task message detected (documentId=${parsed.documentId}). Skipping.`);
-            return 'skipped';
-        }
-
-        const s3Event: S3Event = parsed as S3Event;
-
-        for (const s3Record of s3Event.Records) {
-            const bucketName = s3Record.s3.bucket.name;
-            const objectKey = decodeURIComponent(s3Record.s3.object.key.replace(/\+/g, ' '));
-
-            console.log(`[${requestId}] ✅ Step 1 PASSED: S3 event parsed successfully`);
-            console.log(`[${requestId}] 📋 S3 object details:`);
-            console.log(`[${requestId}]   Bucket: ${bucketName}`);
-            console.log(`[${requestId}]   Object key: ${objectKey}`);
-
-            // Step 2: Check if this is a processed document ready for embedding
-            console.log(`[${requestId}] 🔍 Step 2: Checking processing-status tag...`);
+            console.log(`[${requestId}] 🔍 Step 2: Verifying 'processing-status' tag...`);
             const tags = await s3Client.send(new GetObjectTaggingCommand({ Bucket: bucketName, Key: objectKey }));
             const processingStatus = tags.TagSet?.find(tag => tag.Key === 'processing-status')?.Value;
 
@@ -148,48 +142,38 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
                 console.log(`[${requestId}] ⏭️ Skipping object. Processing status is '${processingStatus || 'not set'}', not 'completed'.`);
                 continue;
             }
+            console.log(`[${requestId}] ✅ Step 2 PASSED: Document is approved for embedding.`);
 
-            console.log(`[${requestId}] ✅ Step 2 PASSED: Document is ready for embedding`);
-
-            // Step 3: Download and parse the processed content
-            console.log(`[${requestId}] 🔍 Step 3: Downloading processed content...`);
+            console.log(`[${requestId}] 🔍 Step 3: Downloading processed content from S3...`);
             const processedObject = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: objectKey }));
-            const processedContent = JSON.parse(await processedObject.Body!.transformToString());
-
+            const processedContent: ProcessedContent = JSON.parse(await processedObject.Body!.transformToString());
             const documentId = processedContent.documentId || objectKey.replace('processed/', '').replace('.json', '');
-            console.log(`[${requestId}] ✅ Step 3 PASSED: Processed content downloaded (${processedContent.chunks.length} chunks)`);
+            console.log(`[${requestId}] ✅ Step 3 PASSED: Processed content downloaded for document ${documentId} (${processedContent.processedContent.chunks.length} chunks)`);
 
-            // Step 4: Process each chunk for embedding
-            console.log(`[${requestId}] 🔍 Step 4: Processing ${processedContent.chunks.length} chunks for embedding...`);
-            
-            for (const chunk of processedContent.chunks) {
-                await processChunkEmbedding(bucketName, objectKey, documentId, chunk, processedContent, requestId);
-            }
+            console.log(`[${requestId}] 🔍 Step 4: Generating embeddings for ${processedContent.processedContent.chunks.length} chunks...`);
+            const chunkPromises = processedContent.processedContent.chunks.map(chunk => 
+                processChunkEmbedding(documentId, chunk, processedContent, requestId)
+            );
+            await Promise.all(chunkPromises);
+            console.log(`[${requestId}] ✅ Step 4 PASSED: All chunk embeddings generated.`);
 
-            // Step 5: Create embedding status object with summary metadata
             console.log(`[${requestId}] 🔍 Step 5: Creating embedding status object...`);
-            
             const embeddingStatusObject = {
                 documentId: documentId,
                 status: 'completed',
                 completedAt: new Date().toISOString(),
                 summary: {
-                    totalChunks: processedContent.chunks.length,
-                    totalDimensions: processedContent.chunks.length * 1024, // Assuming Titan embed dimensions
+                    totalChunks: processedContent.processedContent.chunks.length,
                     model: 'amazon.titan-embed-text-v2:0',
                     processingTimeMs: Date.now() - startTime
                 },
-                chunkReferences: processedContent.chunks.map((chunk: any) => ({
+                chunkReferences: processedContent.processedContent.chunks.map((chunk: any) => ({
                     chunkId: chunk.chunkId,
                     chunkIndex: chunk.chunkIndex,
                     embeddingKey: `embeddings/${documentId}/${chunk.chunkId}.json`,
                     contentLength: chunk.content.length
                 })),
-                originalDocument: {
-                    bucketName: bucketName,
-                    objectKey: objectKey,
-                    documentId: documentId
-                }
+                originalDocument: processedContent.originalDocument
             };
 
             const statusKey = `embedding-status/${documentId}.json`;
@@ -201,71 +185,46 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
                 Metadata: {
                     'document-id': documentId,
                     'status': 'completed',
-                    'total-chunks': processedContent.chunks.length.toString(),
-                    'completed-at': new Date().toISOString()
                 }
             }));
+            console.log(`[${requestId}] ✅ Step 5 PASSED: Embedding status object created at ${statusKey}`);
 
-            const totalDuration = Date.now() - startTime;
-            console.log(`[${requestId}] ✅ Step 5 PASSED: Embedding status object created`);
-            console.log(`[${requestId}] ✅ Document embedding completed successfully in ${totalDuration}ms`);
-            console.log(`[${requestId}]   Document: ${documentId}`);
-            console.log(`[${requestId}]   Chunks processed: ${processedContent.chunks.length}`);
-            console.log(`[${requestId}]   Status object: ${statusKey}`);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            console.error(`[${requestId}] ❌ Failed to process S3 object ${objectKey}:`, error);
+            // Optionally, add a failure tag or status object here
+            throw error; // Re-throw to mark the SQS message as failed
         }
-
-        return 'completed';
-        
-    } catch (error) {
-        const totalDuration = Date.now() - startTime;
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[${requestId}] ❌ Failed to process embedding task after ${totalDuration}ms:`, error);
-        
-        throw error;
     }
 }
 
-/**
- * Process a single chunk for embedding
- */
 async function processChunkEmbedding(
-    bucketName: string,
-    objectKey: string,
     documentId: string,
-    chunk: any,
-    processedContent: any,
+    chunk: ProcessedContentChunk,
+    processedContent: ProcessedContent,
     requestId: string
 ): Promise<void> {
-    const startTime = Date.now();
+    const chunkStartTime = Date.now();
+    const embeddingKey = `embeddings/${documentId}/${chunk.chunkId}.json`;
     
     try {
-        console.log(`[${requestId}] 🔍 Processing chunk ${chunk.chunkIndex} for embedding...`);
-        
-        const embeddingKey = `embeddings/${documentId}/${chunk.chunkId}.json`;
-        await createEmbeddingPlaceholder(embeddingKey, chunk, documentId, requestId);
-        
-        const embeddingStartTime = Date.now();
+        await createEmbeddingPlaceholder(embeddingKey, documentId, chunk, requestId);
+
         const embedding = await generateEmbedding(chunk.content, requestId);
-        const embeddingDuration = Date.now() - embeddingStartTime;
-        
+
         const embeddingResult: EmbeddingResult = {
             documentId: documentId,
-            processingId: processedContent.processingId || 'unknown',
+            processingId: processedContent.processingId,
             chunkId: chunk.chunkId,
             chunkIndex: chunk.chunkIndex,
             embedding: embedding.embedding,
             content: chunk.content,
-            originalDocumentInfo: processedContent.originalDocument || {
-                bucketName: bucketName,
-                objectKey: objectKey.replace('processed/', ''),
-                contentType: 'unknown',
-                fileSize: 0
-            },
+            originalDocumentInfo: processedContent.originalDocument,
             embeddingMetadata: {
                 model: 'amazon.titan-embed-text-v2:0',
                 dimensions: embedding.embedding.length,
                 tokenCount: embedding.inputTextTokenCount,
-                processingTimeMs: embeddingDuration
+                processingTimeMs: Date.now() - chunkStartTime
             },
             processedAt: new Date().toISOString(),
             source: 'rag-embedding-service'
@@ -274,36 +233,27 @@ async function processChunkEmbedding(
         await storeEmbeddingResultWithStatus(
             embeddingKey,
             embeddingResult,
-            Date.now() - startTime,
+            Date.now() - chunkStartTime,
             requestId
         );
-
-        const totalDuration = Date.now() - startTime;
-        console.log(`[${requestId}] ✅ Chunk ${chunk.chunkIndex} embedding completed in ${totalDuration}ms`);
-        
     } catch (error) {
-        const totalDuration = Date.now() - startTime;
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.error(`[${requestId}] ❌ Failed to process chunk ${chunk.chunkIndex} after ${totalDuration}ms:`, error);
-        
-        const embeddingKey = `embeddings/${documentId}/${chunk.chunkId}.json`;
         await updatePlaceholderWithFailure(
             embeddingKey,
             documentId,
             chunk.chunkId,
-            totalDuration,
+            Date.now() - chunkStartTime,
             errorMessage,
             requestId
         );
-        
         throw error;
     }
 }
 
 async function createEmbeddingPlaceholder(
     objectKey: string,
-    chunk: any,
     documentId: string,
+    chunk: ProcessedContentChunk,
     requestId: string
 ): Promise<void> {
     console.log(`[${requestId}] 📍 Creating embedding placeholder: ${objectKey}`);
@@ -315,10 +265,6 @@ async function createEmbeddingPlaceholder(
         status: 'processing',
         queuedAt: new Date().toISOString(),
         placeholder: true,
-        taskInfo: {
-            contentLength: chunk.content.length,
-            source: 'rag-embedding-service'
-        }
     };
 
     await s3Client.send(new PutObjectCommand({
@@ -330,15 +276,8 @@ async function createEmbeddingPlaceholder(
             'processing-status': 'processing',
             'document-id': documentId,
             'chunk-id': chunk.chunkId,
-            'chunk-index': chunk.chunkIndex.toString(),
-            'placeholder': 'true',
-            'queued-at': new Date().toISOString(),
-            'content-length': chunk.content.length.toString(),
-            'source': 'rag-embedding-service'
         }
     }));
-    
-    console.log(`[${requestId}] ✅ Embedding placeholder created with immediate status visibility`);
 }
 
 async function storeEmbeddingResultWithStatus(
@@ -359,7 +298,6 @@ async function storeEmbeddingResultWithStatus(
             'document-id': embeddingResult.documentId,
             'chunk-id': embeddingResult.chunkId,
             'chunk-index': embeddingResult.chunkIndex.toString(),
-            'placeholder': 'false',
             'processed-at': embeddingResult.processedAt,
             'processing-time-ms': totalProcessingTimeMs.toString(),
             'embedding-dimensions': embeddingResult.embeddingMetadata.dimensions.toString(),
@@ -389,13 +327,7 @@ async function updatePlaceholderWithFailure(
             Tagging: {
                 TagSet: [
                     { Key: 'processing-status', Value: 'failed' },
-                    { Key: 'document-id', Value: documentId },
-                    { Key: 'chunk-id', Value: chunkId },
-                    { Key: 'placeholder', Value: 'true' },
-                    { Key: 'failed-at', Value: new Date().toISOString() },
-                    { Key: 'processing-time-ms', Value: totalProcessingTimeMs.toString() },
-                    { Key: 'error-message', Value: errorMessage.substring(0, 1000) },
-                    { Key: 'embedding-source', Value: 'embedding-processor' }
+                    { Key: 'error-message', Value: errorMessage.substring(0, 256) }
                 ]
             }
         }));

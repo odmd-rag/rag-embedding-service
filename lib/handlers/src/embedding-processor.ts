@@ -113,8 +113,22 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
     const startTime = Date.now();
     
     try {
-        console.log(`[${requestId}] 🔍 Step 1: Parsing S3 tagging event from SQS...`);
-        const s3Event: S3Event = JSON.parse(record.body);
+        // Defensive parse to handle legacy messages
+        let parsed: any;
+        try {
+            parsed = JSON.parse(record.body);
+        } catch (err) {
+            console.warn(`[${requestId}] ⚠️ Could not parse record body as JSON, skipping.`);
+            return 'skipped';
+        }
+
+        // If this is a legacy embedding task message (has documentId), skip gracefully
+        if (parsed && parsed.documentId && parsed.chunkId) {
+            console.warn(`[${requestId}] ⚠️ Legacy embedding-task message detected (documentId=${parsed.documentId}). Skipping.`);
+            return 'skipped';
+        }
+
+        const s3Event: S3Event = parsed as S3Event;
 
         for (const s3Record of s3Event.Records) {
             const bucketName = s3Record.s3.bucket.name;

@@ -113,12 +113,9 @@ export class RagEmbeddingStack extends cdk.Stack {
         const processedContentBucket = s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName);
 
         processedContentBucket.addEventNotification(
-            s3.EventType.OBJECT_CREATED,
-            new s3n.SqsDestination(embeddingProcessingQueue),
-            {
-                prefix: 'processed-ready-for-embedding/',
-                suffix: '.json'
-            }
+            s3.EventType.OBJECT_TAGGING_PUT,
+            new s3n.SqsDestination(embeddingProcessingQueue)
+            // Note: Filtering for processing-status=completed will be handled in Lambda
         );
 
         embeddingProcessorHandler.addEventSource(new lambdaEventSources.SqsEventSource(embeddingProcessingQueue, {
@@ -146,6 +143,16 @@ export class RagEmbeddingStack extends cdk.Stack {
             resources: [
                 `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`
             ]
+        }));
+
+        // Grant S3 tagging permissions
+        embeddingProcessorHandler.addToRolePolicy(new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: [
+                's3:PutObjectTagging',
+                's3:GetObjectTagging'
+            ],
+            resources: [embeddingsBucket.arnForObjects('*')]
         }));
 
         embeddingProcessingDlq.grantConsumeMessages(dlqHandlerHandler);

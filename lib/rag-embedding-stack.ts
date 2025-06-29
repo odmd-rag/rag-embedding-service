@@ -72,7 +72,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             memorySize: 1024,
             logRetention: logs.RetentionDays.ONE_WEEK,
             environment: {
-                EMBEDDINGS_BUCKET: embeddingsBucket.bucketName,
+                EMBEDDINGS_BUCKET_NAME: embeddingsBucket.bucketName,
                 AWS_ACCOUNT_ID: this.account,
             },
         });

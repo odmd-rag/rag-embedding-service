@@ -113,12 +113,10 @@ export class RagEmbeddingStack extends cdk.Stack {
         const processedContentBucket = s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName);
 
         processedContentBucket.addEventNotification(
-            s3.EventType.OBJECT_CREATED,
-            new s3n.SqsDestination(embeddingProcessingQueue),
-            {
-                prefix: 'processed/',
-                suffix: '.json'
-            }
+            s3.EventType.OBJECT_TAGGING_PUT,
+            new s3n.SqsDestination(embeddingProcessingQueue)
+            // Note: Direct S3-to-SQS notifications do not support filtering by tag content.
+            // Filtering will be handled by the consumer Lambda.
         );
 
         embeddingProcessorHandler.addEventSource(new lambdaEventSources.SqsEventSource(embeddingProcessingQueue, {

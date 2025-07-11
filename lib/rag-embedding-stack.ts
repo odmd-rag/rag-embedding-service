@@ -16,28 +16,42 @@ import {ApiGatewayv2DomainProperties} from "aws-cdk-lib/aws-route53-targets";
 
 import {NodejsFunction} from 'aws-cdk-lib/aws-lambda-nodejs';
 import {RagEmbeddingEnver} from '@odmd-rag/contracts-lib-rag';
-import {OdmdShareOut} from '@ondemandenv/contracts-lib-base';
 import {StackProps} from "aws-cdk-lib";
+import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { EmbeddingStatusSchema } from './schemas/embedding-status.schema';
+import {OdmdShareOut, OdmdCrossRefProducer} from "@ondemandenv/contracts-lib-base";
+import {GetParameterCommand, SSMClient} from "@aws-sdk/client-ssm";
+import {Bucket} from "aws-cdk-lib/aws-s3";
+import {Role} from "aws-cdk-lib/aws-iam";
 
 
 export class RagEmbeddingStack extends cdk.Stack {
-    readonly httpApi: apigatewayv2.HttpApi;
+
     readonly apiDomain: string;
 
     readonly zoneName: string;
     readonly hostedZoneId: string;
+    readonly myEnver: RagEmbeddingEnver;
+    readonly apiSubdomain:string
 
     constructor(scope: Construct, myEnver: RagEmbeddingEnver, props: StackProps) {
         const id = myEnver.getRevStackNames()[0];
         super(scope, id, {...props, crossRegionReferences: props.env!.region !== 'us-east-1'});
+        this.myEnver = myEnver
 
         this.hostedZoneId = 'Z01450892FNOJJT5BBBRU';
         this.zoneName = 'rag-ws1.root.ondemandenv.link';
 
-        const apiSubdomain = ('eb-api.' + myEnver.targetRevision.value + '.' + myEnver.owner.buildId).toLowerCase()
-        this.apiDomain = `${apiSubdomain}.${this.zoneName}`;
+        this.apiSubdomain = ('eb-api.' + myEnver.targetRevision.value + '.' + myEnver.owner.buildId).toLowerCase()
+        this.apiDomain = `${this.apiSubdomain}.${this.zoneName}`;
+    }
+    async render(){
 
-        const processedContentBucketName = myEnver.processedContentSubscription.getSharedValue(this);
+        const processedContentBucketName = this.myEnver.processedContentSubscription.getSharedValue(this);
 
         const embeddingProcessingDlq = new sqs.Queue(this, 'EmbProcessingDlq', {
             retentionPeriod: cdk.Duration.days(14),
@@ -63,6 +77,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             publicReadAccess: false,
             blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         });
+
 
         const embeddingProcessorHandler = new NodejsFunction(this, 'EmbEmbeddingProcessorHandler', {
             runtime: lambda.Runtime.NODEJS_18_X,
@@ -113,7 +128,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         const processedContentBucket = s3.Bucket.fromBucketName(this, 'EmbProcessedContentBucket', processedContentBucketName);
 
         processedContentBucket.addEventNotification(
-            s3.EventType.OBJECT_TAGGING_PUT,
+            s3.EventType.OBJECT_CREATED,
             new s3n.SqsDestination(embeddingProcessingQueue)
             // Note: Filtering for processing-status=completed will be handled in Lambda
         );
@@ -187,7 +202,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             description: 'SQS queue for embedding processing tasks',
         });
 
-        const ingestionEnver = myEnver.processedContentSubscription.producer.owner.ingestionEnver
+        const ingestionEnver = this.myEnver.processedContentSubscription.producer.owner.ingestionEnver
 
         // CORS configuration
         const allowedOrigins = ['http://localhost:5173'];
@@ -197,7 +212,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         const clientId = ingestionEnver.authProviderClientId.getSharedValue(this);
         const providerName = ingestionEnver.authProviderName.getSharedValue(this);
 
-        this.httpApi = new apigatewayv2.HttpApi(this, 'EmbApi', {
+        const httpApi = new apigatewayv2.HttpApi(this, 'EmbApi', {
             apiName: 'RAG Embedding Service',
             description: 'HTTP API for RAG embedding service status with JWT authentication',
             defaultAuthorizer: new HttpJwtAuthorizer('Auth',
@@ -224,7 +239,7 @@ export class RagEmbeddingStack extends cdk.Stack {
             },
         });
 
-        this.httpApi.addRoutes({
+        httpApi.addRoutes({
             path: '/status/{documentId}',
             methods: [apigatewayv2.HttpMethod.GET],
             integration: new apigatewayv2Integrations.HttpLambdaIntegration('EmbStatusIntegration', statusHandler),
@@ -244,7 +259,7 @@ export class RagEmbeddingStack extends cdk.Stack {
         });
 
         new apigatewayv2.ApiMapping(this, 'EmbApiMapping', {
-            api: this.httpApi,
+            api: httpApi,
             domainName: domainName,
         });
 
@@ -256,21 +271,56 @@ export class RagEmbeddingStack extends cdk.Stack {
                     domainName.regionalHostedZoneId
                 )
             ),
-            recordName: apiSubdomain,
+            recordName: this.apiSubdomain,
         });
 
         new cdk.CfnOutput(this, 'EmbApiEndpoint', {
             value: `https://${this.apiDomain}`,
             exportName: `${this.stackName}-EmbApiEndpoint`,
         });
+        const schemaS3Url = await this.deploySchema( EmbeddingStatusSchema, this.myEnver.embeddingStorage.embeddingStatusSchemaS3Url )
 
         new OdmdShareOut(
             this, new Map([
-                [myEnver.embeddingStorage.embeddingsBucket, embeddingsBucket.bucketName],
+                [this.myEnver.embeddingStorage, embeddingsBucket.bucketName],
+                [this.myEnver.embeddingStorage.embeddingStatusSchemaS3Url, schemaS3Url],
 
                 // Status API endpoint for WebUI tracking
-                [myEnver.statusApi.statusApiEndpoint, `https://${this.apiDomain}/status`],
+                [this.myEnver.statusApi, `https://${this.apiDomain}/status`],
             ])
         );
+    }
+
+
+
+    private async deploySchema(jsonSchema: any, urlPrd: OdmdCrossRefProducer<typeof this.myEnver>) {
+        const gitSha = execSync('git rev-parse HEAD').toString().trim();
+        const schemaFileName = `${urlPrd.node.id}-${gitSha}.json`;
+
+        const tempSchemaDir = path.join(__dirname, '..', 'cdk.out', 'schemas');
+        fs.mkdirSync(tempSchemaDir, {recursive: true});
+        const tempSchemaPath = path.join(tempSchemaDir, schemaFileName);
+        fs.writeFileSync(tempSchemaPath, JSON.stringify(jsonSchema, null, 2));
+
+        const parameterName = urlPrd.owner.artifactPrefixSsm.substring(0, urlPrd.owner.artifactPrefixSsm.length - this.account.length - 1);
+
+        const ssm = new SSMClient()
+        const bucketResp = await ssm.send(new GetParameterCommand({Name: parameterName}))
+
+        const artBucket = Bucket.fromBucketName(this, 'artBucket', bucketResp.Parameter!.Value!);
+
+        const bd = new BucketDeployment(this, 'DocumentMetadataSchemaDeployment', {
+            sources: [Source.asset(tempSchemaDir)],
+            destinationBucket: artBucket,
+            destinationKeyPrefix: `${this.account}`,
+            retainOnDelete: true,
+            prune: false,
+            role: Role.fromRoleArn(this, 'currentRole', urlPrd.owner.buildRoleArn)
+        });
+
+        // return artBucket.bucketArn + '/' + Fn.select(0, bd.objectKeys); => arn:aws:s3:::odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/0b3bdd2050cd5d3e69f7f3e6e344f1c0818e60b4a2dd7e948825813e9aa7a003.zip
+
+        //s3://odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/366920167720/store-schema-cfe2746c7b310aea3de0d38c60b16393dfe7ad54.json
+        return 's3://' + artBucket.bucketName + '/' + this.account +'/' + schemaFileName
     }
 } 

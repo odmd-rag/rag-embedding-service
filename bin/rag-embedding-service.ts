@@ -1,42 +1,32 @@
 #!/usr/bin/env node
-import 'source-map-support/register';
+
 import * as cdk from 'aws-cdk-lib';
-import { RagEmbeddingStack } from '../lib/rag-embedding-stack';
-import { RagContracts } from '@odmd-rag/contracts-lib-rag';
+import {RagEmbeddingStack} from '../lib/rag-embedding-stack';
+import {RagContracts, RagEmbeddingEnver} from '@odmd-rag/contracts-lib-rag';
+import {StackProps} from "aws-cdk-lib";
+
+const app = new cdk.App();
 
 async function main() {
-    const app = new cdk.App();
-
-    const ragContracts = new RagContracts(app);
-
-    const embeddingDev = ragContracts.ragEmbeddingBuild.dev;
-    const embeddingProd = ragContracts.ragEmbeddingBuild.prod;
-
-    const targetEnv = app.node.tryGetContext('env') || process.env.TARGET_ENV || 'dev';
-
-    let targetEnver;
-    if (targetEnv === 'prod' || targetEnv === 'production') {
-        targetEnver = embeddingProd;
-    } else {
-        targetEnver = embeddingDev;
+    const buildRegion = process.env.CDK_DEFAULT_REGION;
+    const buildAccount = process.env.CDK_DEFAULT_ACCOUNT;
+    if (!buildRegion || !buildAccount) {
+        throw new Error("buildRegion>" + buildRegion + "; buildAccount>" + buildAccount);
     }
 
-    console.log(`Deploying RAG Embedding Service to ${targetEnv} environment`);
-    console.log(`Target Account: ${targetEnver.targetAWSAccountID}`);
-    console.log(`Target Region: ${targetEnver.targetAWSRegion}`);
-
-    new RagEmbeddingStack(app, targetEnver, {
+    const props = {
         env: {
-            account: targetEnver.targetAWSAccountID,
-            region: targetEnver.targetAWSRegion,
-        },
-        description: `RAG Embedding Service - ${targetEnv} environment`,
-        tags: {
-            'ondemandenv:service': 'rag-embedding',
-            'ondemandenv:environment': targetEnv,
-            'ondemandenv:managed': 'true'
+            account: buildAccount,
+            region: buildRegion
         }
-    });
+    } as StackProps;
+
+    new RagContracts(app);
+
+    const targetEnver = RagContracts.inst.getTargetEnver() as RagEmbeddingEnver
+
+    const mainstack = new RagEmbeddingStack(app, targetEnver, props);
+    await mainstack.render()
 }
 
 main().catch((error) => {

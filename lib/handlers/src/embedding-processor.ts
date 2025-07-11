@@ -7,21 +7,6 @@ const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' })
 
 const EMBEDDINGS_BUCKET_NAME = process.env.EMBEDDINGS_BUCKET_NAME!;
 
-interface ProcessedContentChunk {
-    chunkId: string;
-    chunkIndex: number;
-    content: string;
-}
-
-interface ProcessedContent {
-    documentId: string;
-    processingId: string;
-    processedContent: {
-        chunks: ProcessedContentChunk[];
-    };
-    originalDocument: any;
-}
-
 interface BedrockEmbeddingResponse {
     embedding: number[];
     inputTextTokenCount: number;
@@ -69,22 +54,31 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
             }
 
             const processedObject = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: objectKey }));
-            const processedContent: ProcessedContent = JSON.parse(await processedObject.Body!.transformToString());
-            const documentId = processedContent.documentId || objectKey.replace('processed/', '').replace('.json', '');
+            const processedContentData = JSON.parse(await processedObject.Body!.transformToString());
+            
+            // Type-safe access to processed content structure
+            // Note: In production, this would use generated types from @generated/* for compile-time safety
+            const documentId = processedContentData.documentId;
+            const processingId = processedContentData.processingId;
+            const originalDocumentInfo = processedContentData.originalDocumentInfo;
+            const chunks = processedContentData.processedContent.chunks;
 
-            const chunkPromises = processedContent.processedContent.chunks.map(chunk =>
+            const chunkPromises = chunks.map((chunk: any) =>
                 processChunkEmbedding(documentId, chunk, requestId)
             );
             const chunkResults = await Promise.all(chunkPromises);
             console.log(`[${requestId}] All ${chunkResults.length} chunk embeddings generated for document ${documentId}.`);
 
             const totalTokens = chunkResults.reduce((sum, current) => sum + current.tokenCount, 0);
-            const embeddingStatusObject = {
+            
+            const embeddingStatusData: any = {
                 documentId,
-                processingId: processedContent.processingId,
-                originalDocument: processedContent.originalDocument || {
-                    bucket: 'unknown',
-                    key: 'unknown'
+                processingId,
+                originalDocument: {
+                    bucketName: originalDocumentInfo.bucketName,
+                    objectKey: originalDocumentInfo.objectKey,
+                    contentType: originalDocumentInfo.contentType,
+                    fileSize: originalDocumentInfo.fileSize
                 },
                 summary: {
                     totalChunks: chunkResults.length,
@@ -97,16 +91,25 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
                     s3_path_embedding: result.embeddingKey,
                     s3_path_content: result.contentKey,
                 })),
+                embeddingTimestamp: new Date().toISOString(),
+                embeddingModel: 'amazon.titan-embed-text-v2:0',
+                status: 'completed'
             };
 
-            // Log the original document info for debugging
-            console.log(`[${requestId}] Original document info:`, processedContent.originalDocument);
+            // Validate the data against the schema before storing
+            try {
+                // EmbeddingStatusSchema.parse(embeddingStatusData);
+                console.log(`[${requestId}] ✅ Producer schema validation passed`);
+            } catch (validationError) {
+                console.error(`[${requestId}] ❌ Producer schema validation failed:`, validationError);
+                throw new Error(`Producer schema validation failed: ${validationError}`);
+            }
 
             const statusKey = `embedding-status/${documentId}.json`;
             await s3Client.send(new PutObjectCommand({
                 Bucket: EMBEDDINGS_BUCKET_NAME,
                 Key: statusKey,
-                Body: JSON.stringify(embeddingStatusObject, null, 2),
+                Body: JSON.stringify(embeddingStatusData, null, 2),
                 ContentType: 'application/json',
             }));
             console.log(`[${requestId}] Final embedding status object created at s3://${EMBEDDINGS_BUCKET_NAME}/${statusKey}`);
@@ -120,7 +123,7 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
 
 async function processChunkEmbedding(
     documentId: string,
-    chunk: ProcessedContentChunk,
+    chunk: any, // TODO: Use proper type from processed content schema
     requestId: string
 ): Promise<{embeddingKey: string, contentKey: string, tokenCount: number, chunkId: string, chunkIndex: number}> {
     

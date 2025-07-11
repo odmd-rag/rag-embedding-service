@@ -32,7 +32,12 @@ jobs:
       - uses: actions/checkout@v3
         with:
           ref: ${{ github.ref }}
-      
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: 'arn:aws:iam::366920167720:role/ragEmbed/ragEmbed-us-east-2366920167720-buildRole'
+          aws-region: us-east-2
+
       - uses: ondemandenv/wflact-resolvEnvars@main
         with:
           aws_credentials: ${{github.event.inputs.aws_credentials}}

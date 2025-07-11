@@ -126,35 +126,50 @@ export class SchemaTypeGenerator {
     private async generateTypeScriptTypes(schema: GeneratedSchema, time: Date): Promise<void> {
         console.log(`generateTypeScriptTypes: ${JSON.stringify(schema, null, 2)}`);
         const {consumerId, schemaS3Url, gitSha, jsonSchemaStr} = schema;
-        // Save JSON schema file
 
-        const schemaFileName = `${consumerId}-${time.getTime()}.schema.json`;
+        const timeStr = time.toISOString();
+        const schemaFileName = `${consumerId}-${timeStr}.schema.json`;
         const schemaFilePath = path.join(this.outputDir, schemaFileName);
 
         console.log(`generateTypeScriptTypes fs.writeFileSync: ${schemaFilePath}`);
         fs.writeFileSync(schemaFilePath, jsonSchemaStr);
 
         // Generate TypeScript types using json-schema-to-typescript
-        const typeFileName = `${consumerId}-${time.getTime()}.types.ts`;
+        const typeFileName = `${consumerId}-${timeStr}.types.ts`;
         const typeFilePath = path.join(this.outputDir, typeFileName);
 
         const bannerComment = `/* AUTO-GENERATED ⏤ schema-sha:${gitSha} source:${schemaS3Url} consumer:${consumerId} */`;
 
         try {
-            // Use npx to run json-schema-to-typescript
-            const command = `npx json-schema-to-typescript "${schemaFilePath}" --bannerComment "${bannerComment}" --unknownAny false --declareExternallyReferenced false`;
-
-            const typeDefinitions = execSync(command, {
+            // Generate Zod schemas using json-schema-to-zod
+            const zodFileName = `${consumerId}-${timeStr}.zod.ts`;
+            const zodFilePath = path.join(this.outputDir, zodFileName);
+            
+            // Create valid JavaScript identifier name
+            const camelCaseConsumerId = consumerId.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+            const zodCommand = `npx json-schema-to-zod --input "${schemaFilePath}" --name "${camelCaseConsumerId}Schema" --noImport`;
+            
+            const zodSchemas = execSync(zodCommand, {
                 encoding: 'utf8',
                 cwd: path.dirname(this.outputDir)
             });
+            
+            // Create content with both schema and inferred types
+            const zodContent = `${bannerComment}
 
-            fs.writeFileSync(typeFilePath, typeDefinitions);
+import { z } from 'zod';
 
-            console.log(`✅ Generated types for ${consumerId} (SHA: ${gitSha})`);
+${zodSchemas}
+
+// Inferred TypeScript types from Zod schemas
+export type ${camelCaseConsumerId}Schema = z.infer<typeof ${camelCaseConsumerId}Schema>;`;
+            
+            fs.writeFileSync(zodFilePath, zodContent);
+            
+            console.log(`✅ Generated Zod schemas and types for ${consumerId} (SHA: ${gitSha})`);
 
         } catch (error) {
-            console.error(`❌ Failed to generate TypeScript types for ${consumerId}:`, error);
+            console.error(`❌ Failed to generate Zod schemas for ${consumerId}:`, error);
             throw error;
         }
     }

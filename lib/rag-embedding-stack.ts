@@ -21,12 +21,14 @@ import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import { EmbeddingStatusSchema } from './schemas/embedding-status.schema';
 import {OdmdShareOut, OdmdCrossRefProducer} from "@ondemandenv/contracts-lib-base";
 import {GetParameterCommand, SSMClient} from "@aws-sdk/client-ssm";
 import {Bucket} from "aws-cdk-lib/aws-s3";
 import {Role} from "aws-cdk-lib/aws-iam";
+import {AwsCustomResource, PhysicalResourceId} from "aws-cdk-lib/custom-resources";
+import {zodToJsonSchema} from "zod-to-json-schema";
+import {ZodObject} from "zod";
 
 
 export class RagEmbeddingStack extends cdk.Stack {
@@ -291,16 +293,14 @@ export class RagEmbeddingStack extends cdk.Stack {
         );
     }
 
-
-
-    private async deploySchema(jsonSchema: any, urlPrd: OdmdCrossRefProducer<typeof this.myEnver>) {
+    private async deploySchema(schema: ZodObject<any>, urlPrd: OdmdCrossRefProducer<typeof this.myEnver>) {
         const gitSha = execSync('git rev-parse HEAD').toString().trim();
-        const schemaFileName = `${urlPrd.node.id}-${gitSha}.json`;
+        const schemaFileName = `${urlPrd.node.id}.json`;
 
         const tempSchemaDir = path.join(__dirname, '..', 'cdk.out', 'schemas');
         fs.mkdirSync(tempSchemaDir, {recursive: true});
         const tempSchemaPath = path.join(tempSchemaDir, schemaFileName);
-        fs.writeFileSync(tempSchemaPath, JSON.stringify(jsonSchema, null, 2));
+        fs.writeFileSync(tempSchemaPath, JSON.stringify(zodToJsonSchema(schema), null, 2));
 
         const parameterName = urlPrd.owner.artifactPrefixSsm.substring(0, urlPrd.owner.artifactPrefixSsm.length - this.account.length - 1);
 
@@ -309,18 +309,54 @@ export class RagEmbeddingStack extends cdk.Stack {
 
         const artBucket = Bucket.fromBucketName(this, 'artBucket', bucketResp.Parameter!.Value!);
 
-        const bd = new BucketDeployment(this, 'DocumentMetadataSchemaDeployment', {
+        const buildRole = Role.fromRoleArn(this, 'currentRole', urlPrd.owner.buildRoleArn);
+        const deployment = new BucketDeployment(this, 'DocumentMetadataSchemaDeployment', {
             sources: [Source.asset(tempSchemaDir)],
             destinationBucket: artBucket,
             destinationKeyPrefix: `${this.account}`,
             retainOnDelete: true,
             prune: false,
-            role: Role.fromRoleArn(this, 'currentRole', urlPrd.owner.buildRoleArn)
+            role: buildRole,
         });
+        const s3ObjKey = this.account + '/' + schemaFileName;
+
+        const getObjectVersion = new AwsCustomResource(this, 'GetObjectVersion', {
+            onUpdate: {
+                service: 'S3',
+                action: 'listObjectVersions',
+                parameters: {
+                    Bucket: bucketResp.Parameter!.Value!,
+                    Prefix: s3ObjKey,
+                },
+                physicalResourceId: PhysicalResourceId.of('versioning_' + gitSha),
+            },
+            role: buildRole
+        });
+        getObjectVersion.node.addDependency(deployment);
+
+        const addObjectTags = new AwsCustomResource(this, 'AddObjectTags', {
+            onUpdate: {
+                service: 'S3',
+                action: 'putObjectTagging',
+                parameters: {
+                    Bucket: bucketResp.Parameter!.Value!,
+                    Key: s3ObjKey,
+                    VersionId: getObjectVersion.getResponseField('Versions.0.VersionId'),
+                    Tagging: {
+                        TagSet: [
+                            {Key: 'gitsha', Value: gitSha},
+                        ],
+                    },
+                },
+                physicalResourceId: PhysicalResourceId.of('gitSha_' + gitSha),
+            },
+            role: buildRole
+        });
+        addObjectTags.node.addDependency(deployment);
 
         // return artBucket.bucketArn + '/' + Fn.select(0, bd.objectKeys); => arn:aws:s3:::odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/0b3bdd2050cd5d3e69f7f3e6e344f1c0818e60b4a2dd7e948825813e9aa7a003.zip
 
-        //s3://odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/366920167720/store-schema-cfe2746c7b310aea3de0d38c60b16393dfe7ad54.json
-        return 's3://' + artBucket.bucketName + '/' + this.account +'/' + schemaFileName
+        //s3://odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/366920167720/store-schema-cfe2746c7b310aea3de0d38c60b16393dfe7ad54.json@2
+        return 's3://' + artBucket.bucketName + '/' + s3ObjKey + '@' + getObjectVersion.getResponseField('Versions.0.VersionId')
     }
 } 

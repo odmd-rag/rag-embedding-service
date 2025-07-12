@@ -15,7 +15,11 @@
     "typeRoots": [
       "node_modules/@types",
       "../generated-types"
-    ]
+    ],
+    "baseUrl": "..",
+    "paths": {
+      "@generated/*": ["../src/__generated__/*"]
+    }
   },
   "include": [
     "src/**/*",

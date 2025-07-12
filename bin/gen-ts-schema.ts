@@ -15,7 +15,7 @@ interface GeneratedSchema {
     consumerId: string;
     schemaPath: string;
     schemaS3Url: string;
-    gitSha: string;
+    ver: string;
     jsonSchemaStr: any;
 }
 
@@ -58,11 +58,11 @@ export class SchemaTypeGenerator {
         const schemas = await Promise.allSettled(
             consumers.map(async c => {
                 const cl = paramValLineArr.find(p => p.startsWith(c.node.id + ':'))!
+                // s3://odmd-build-ragingest-ragingestartifactse23a694f-8mgcyxvb7dyf/366920167720/store-schema.json@haEk7y4ShsOj7WFpuXkcn39_TKhkiMxs
                 const schemaS3Url = cl.substring((c.node.id + ':').length);
                 const tmpArr = schemaS3Url.split('/')
-                const [Bucket, Key] = [tmpArr[2], tmpArr.slice(3).join('/')]
-                const gitShaMatch = Key.match(/([a-f0-9]{40})/)!
-                const gitSha = gitShaMatch[1]
+                const [Bucket, Kav] = [tmpArr[2], tmpArr.slice(3).join('/')]
+                const [Key, ver ] = Kav.split('@')
 
                 const response = await s3Client.send(new GetObjectCommand({Bucket, Key}))
 
@@ -70,7 +70,7 @@ export class SchemaTypeGenerator {
                 const ret = {
                     consumerId: c.node.id,
                     schemaS3Url,
-                    gitSha,
+                    ver: ver,
                     jsonSchemaStr
                 } as GeneratedSchema;
                 await this.generateTypeScriptTypes(ret, response.LastModified!)
@@ -125,24 +125,23 @@ export class SchemaTypeGenerator {
 
     private async generateTypeScriptTypes(schema: GeneratedSchema, time: Date): Promise<void> {
         console.log(`generateTypeScriptTypes: ${JSON.stringify(schema, null, 2)}`);
-        const {consumerId, schemaS3Url, gitSha, jsonSchemaStr} = schema;
+        const {consumerId, schemaS3Url, ver, jsonSchemaStr} = schema;
 
-        const timeStr = time.toISOString();
-        const schemaFileName = `${consumerId}-${timeStr}.schema.json`;
+        const schemaFileName = `${consumerId}-${schema.ver}.schema.json`;
         const schemaFilePath = path.join(this.outputDir, schemaFileName);
 
         console.log(`generateTypeScriptTypes fs.writeFileSync: ${schemaFilePath}`);
         fs.writeFileSync(schemaFilePath, jsonSchemaStr);
 
         // Generate TypeScript types using json-schema-to-typescript
-        const typeFileName = `${consumerId}-${timeStr}.types.ts`;
+        const typeFileName = `${consumerId}-${schema.ver}.types.ts`;
         const typeFilePath = path.join(this.outputDir, typeFileName);
 
-        const bannerComment = `/* AUTO-GENERATED ⏤ schema-sha:${gitSha} source:${schemaS3Url} consumer:${consumerId} */`;
+        const bannerComment = `/* AUTO-GENERATED ⏤ schema-sha:${ver} source:${schemaS3Url} consumer:${consumerId} */`;
 
         try {
             // Generate Zod schemas using json-schema-to-zod
-            const zodFileName = `${consumerId}-${timeStr}.zod.ts`;
+            const zodFileName = `${consumerId}-${schema.ver}.zod.ts`;
             const zodFilePath = path.join(this.outputDir, zodFileName);
             
             // Create valid JavaScript identifier name
@@ -166,7 +165,7 @@ export type ${camelCaseConsumerId}Schema = z.infer<typeof ${camelCaseConsumerId}
             
             fs.writeFileSync(zodFilePath, zodContent);
             
-            console.log(`✅ Generated Zod schemas and types for ${consumerId} (SHA: ${gitSha})`);
+            console.log(`✅ Generated Zod schemas and types for ${consumerId} (SHA: ${ver})`);
 
         } catch (error) {
             console.error(`❌ Failed to generate Zod schemas for ${consumerId}:`, error);

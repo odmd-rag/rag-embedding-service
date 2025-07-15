@@ -73,13 +73,13 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
         const startTime = Date.now();
 
         try {
-            const tags = await s3Client.send(new GetObjectTaggingCommand({ Bucket: bucketName, Key: objectKey }));
-            if (tags.TagSet?.find(t => t.Key === 'processing-status')?.Value !== 'completed') {
-                console.log(`[${requestId}] Skipping object ${objectKey} as it is not marked 'completed'.`);
+            const processedObject = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: objectKey }));
+            
+            // Check processing status from S3 metadata (not tags)
+            if (processedObject.Metadata?.['processing-status'] !== 'completed') {
+                console.log(`[${requestId}] Skipping object ${objectKey} as it is not marked 'completed' in metadata. Status: ${processedObject.Metadata?.['processing-status'] || 'not set'}`);
                 continue;
             }
-
-            const processedObject = await s3Client.send(new GetObjectCommand({ Bucket: bucketName, Key: objectKey }));
             const rawProcessedContentData = JSON.parse(await processedObject.Body!.transformToString());
             
             // Validate processed content against schema

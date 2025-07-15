@@ -14,14 +14,15 @@ import { SQSEvent, SQSRecord, Context, SQSBatchResponse, SQSBatchItemFailure, S3
 import { S3Client, PutObjectCommand, GetObjectCommand, GetObjectTaggingCommand, GetObjectAttributesCommand, ObjectAttributes } from '@aws-sdk/client-s3';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import { z } from 'zod';
-import {processedContentSchemaS3UrlSchema} from "@generated/processedContentSchemaS3Url-2025-07-10T22:49:30.000Z.zod";
+import {
+    processedContentSchemaS3UrlSchema
+} from "@generated/processedContentSchemaS3Url-.l8odVTcNHemqy_bVTieF74Gkhm0SfgM.zod";
 import {
     createS3EmbeddingMetadata,
     EmbeddingStatus,
     S3EmbeddingMetadata,
     validateEmbeddingStatus
 } from "../../schemas/embedding-status.schema";
-
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });

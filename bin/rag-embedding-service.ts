@@ -4,6 +4,7 @@ import * as cdk from 'aws-cdk-lib';
 import {RagEmbeddingStack} from '../lib/rag-embedding-stack';
 import {RagContracts, RagEmbeddingEnver} from '@odmd-rag/contracts-lib-rag';
 import {StackProps} from "aws-cdk-lib";
+import {SchemaTypeGenerator} from "./gen-ts-schema";
 
 const app = new cdk.App();
 
@@ -23,6 +24,9 @@ async function main() {
 
     new RagContracts(app);
 
+    const gen = new SchemaTypeGenerator();
+    await gen.run()
+    
     const targetEnver = RagContracts.inst.getTargetEnver() as RagEmbeddingEnver
 
     const mainstack = new RagEmbeddingStack(app, targetEnver, props);

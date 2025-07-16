@@ -288,7 +288,7 @@ export class RagEmbeddingStack extends cdk.Stack {
                 [this.myEnver.embeddingStorage.embeddingStatusSchemaS3Url, schemaS3Url],
 
                 // Status API endpoint for WebUI tracking
-                [this.myEnver.statusApi, `https://${this.apiDomain}/status`],
+                [this.myEnver.statusApi.statusApiEndpoint, `https://${this.apiDomain}/status`],
             ])
         );
     }

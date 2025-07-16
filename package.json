@@ -42,7 +42,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@odmd-rag/contracts-lib-rag": "1.0.27",
+    "@odmd-rag/contracts-lib-rag": "1.0.29",
     "@types/aws-lambda": "^8.10.130",
     "@types/jest": "^29.5.8",
     "@types/node": "20.10.5",

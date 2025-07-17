@@ -20,7 +20,7 @@ interface GeneratedSchema {
 }
 
 export class SchemaTypeGenerator {
-    private outputDir = path.join(__dirname, '..', 'src', '__generated__');
+    private outputDir = path.join(__dirname, '..', 'lib', 'handlers', 'src', '__generated__');
 
     constructor() {
         console.log(`🚀 Starting schema type generation for ${process.env.ODMD_buildId!}/${process.env.ODMD_rev_ref!}`);

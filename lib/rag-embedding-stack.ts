@@ -21,7 +21,7 @@ import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { EmbeddingStatusSchema } from './schemas/embedding-status.schema';
+import { EmbeddingStatusSchema } from './handlers/src/schemas/embedding-status.schema';
 import {OdmdShareOut, OdmdCrossRefProducer} from "@ondemandenv/contracts-lib-base";
 import {GetParameterCommand, SSMClient} from "@aws-sdk/client-ssm";
 import {Bucket} from "aws-cdk-lib/aws-s3";

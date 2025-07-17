@@ -16,13 +16,13 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 import { z } from 'zod';
 import {
     processedContentSchemaS3UrlSchema
-} from "@generated/processedContentSchemaS3Url-.l8odVTcNHemqy_bVTieF74Gkhm0SfgM.zod";
+} from "./__generated__/processedContentSchemaS3Url-.l8odVTcNHemqy_bVTieF74Gkhm0SfgM.zod";
 import {
     createS3EmbeddingMetadata,
     EmbeddingStatus,
     S3EmbeddingMetadata,
     validateEmbeddingStatus
-} from "../../schemas/embedding-status.schema";
+} from "./schemas/embedding-status.schema";
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || 'us-east-2' });
 const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
@@ -98,8 +98,15 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
             // Type-safe access to processed content structure
             const documentId = processedContentData.documentId;
             const processingId = processedContentData.processingId;
+            const jwtToken = (processedContentData as any).jwtToken;
             const originalDocumentInfo = processedContentData.originalDocumentInfo;
             const chunks = processedContentData.processedContent.chunks;
+            
+            if (jwtToken) {
+                console.log(`[${requestId}] JWT token found in processed content`);
+            } else {
+                console.warn(`[${requestId}] JWT token not found in processed content`);
+            }
 
             const chunkPromises = chunks.map((chunk: ContentChunk) =>
                 processChunkEmbedding(documentId, chunk, requestId)
@@ -115,6 +122,7 @@ async function processEmbeddingTask(record: SQSRecord, requestId: string): Promi
             const embeddingStatusData: EmbeddingStatus = {
                 documentId,
                 processingId,
+                jwtToken,
                 originalDocument: {
                     bucketName: originalDocumentInfo.bucketName,
                     objectKey: originalDocumentInfo.objectKey,

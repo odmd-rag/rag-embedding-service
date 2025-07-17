@@ -16,7 +16,7 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 import { z } from 'zod';
 import {
     processedContentSchemaS3UrlSchema
-} from "./__generated__/processedContentSchemaS3Url-.l8odVTcNHemqy_bVTieF74Gkhm0SfgM.zod";
+} from "./__generated__/processedContentSchemaS3Url-K2xsZHxsiqfk_nIBTP2xT5wvhz5gG_AQ.zod";
 import {
     createS3EmbeddingMetadata,
     EmbeddingStatus,

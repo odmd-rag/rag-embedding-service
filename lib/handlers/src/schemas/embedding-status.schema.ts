@@ -27,7 +27,6 @@ export const OriginalDocumentReferenceSchema = z.object({
 export const EmbeddingStatusSchema = z.object({
   documentId: z.string(),
   processingId: z.string(),
-  jwtToken: z.string().optional().describe('JWT token for downstream service authentication'),
   originalDocument: OriginalDocumentReferenceSchema,
   summary: EmbeddingSummarySchema,
   chunkReferences: z.array(ChunkReferenceSchema),
